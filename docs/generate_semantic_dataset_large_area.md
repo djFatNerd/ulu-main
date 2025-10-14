@@ -6,6 +6,9 @@ run automatically; you should choose it when the requested area risks exceeding
 Overpass limits or local memory. The helper automatically splits the query
 square into smaller tiles, renders each tile sequentially, and then stitches the
 semantic rasters and building GeoJSON back together.
+`generate_semantic_dataset.py` to support very large regions. It automatically
+splits a query square into smaller tiles, renders each tile sequentially, and
+then stitches the semantic rasters and building GeoJSON back together.
 
 ## Why use the tiling helper?
 
