@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from semantic_palette import SEMANTIC_COLOR_PALETTE
+from .semantic_palette import SEMANTIC_COLOR_PALETTE
 
 
 # ---------------------------------------------------------------------------
