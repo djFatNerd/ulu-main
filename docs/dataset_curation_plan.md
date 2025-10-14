@@ -36,7 +36,7 @@ Batch workers can sweep tiles of imagery or panoramic datasets for supervision s
 4. **Hierarchy Assembly**: Define rules to reconcile conflicts (e.g., OSM says `residential`, Google type says `lodging`). Prioritize authoritative sources and flag uncertain cases for manual QA or LLM-based adjudication.
 
 ## Scalable Workflow
-1. Tile the area into overlapping squares sized to stay within API result limits; exhaust each cell before advancing to maintain deterministic coverage.
+1. Tile the area into overlapping circles sized to stay within API result limits; exhaust each cell before advancing to maintain deterministic coverage.
 2. Persist raw API responses, semantic rasters, and derived labels into an offline cache directory keyed by geohash to enable replays via the same hooks used for the initial download.
 3. Parallelize the extraction pipeline with rate-limit aware workers; throttle high-cost downloads (e.g., imagery) according to provider quotas and local bandwidth.
 4. Produce a final database schema (e.g., Parquet files) with tables for tiles, polygons, building metadata, and imagery references so downstream agents can operate without live API calls.

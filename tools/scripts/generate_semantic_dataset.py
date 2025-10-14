@@ -42,12 +42,6 @@ ROAD_WIDTHS = {
 MIN_BUILDING_HOLE_PIXELS = 16
 
 
-DEFAULT_OVERPASS_FALLBACKS = [
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.ru/api/interpreter",
-]
-
-
 # ---------------------------------------------------------------------------
 # Building classification helpers
 # ---------------------------------------------------------------------------
