@@ -18,7 +18,7 @@ then stitches the semantic rasters and building GeoJSON back together.
   and disk usage match the tile size rather than the full region.
 - **Deterministic coverage.** Tiles are laid out without gaps so features along
   the tile borders are preserved.
-- **Progress tracking.** A simple text progress bar reports how many of the
+- **Progress tracking.** A `tqdm` progress indicator reports how many of the
   `N` tiles have finished (`1/N`, `2/N`, …) as the script runs.
 
 ## Usage

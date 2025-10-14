@@ -5,9 +5,10 @@ import argparse
 import json
 import logging
 import math
-import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+from tqdm import tqdm
 
 from generate_semantic_dataset import (
     CLASS_TO_ID,
@@ -20,18 +21,6 @@ from generate_semantic_dataset import (
     run_generation,
 )
 from semantic_palette import SEMANTIC_COLOR_PALETTE
-
-
-def _progress_bar(completed: int, total: int) -> None:
-    total = max(total, 1)
-    fraction = min(max(completed / total, 0.0), 1.0)
-    bar_length = 40
-    filled = int(round(bar_length * fraction))
-    bar = "#" * filled + "-" * (bar_length - filled)
-    sys.stdout.write(f"\rProgress: [{bar}] {completed}/{total}")
-    sys.stdout.flush()
-    if completed >= total:
-        sys.stdout.write("\n")
 
 
 def _tile_offsets(radius_m: float, max_tile_radius: float) -> Tuple[float, int, List[float], List[float]]:
@@ -146,7 +135,6 @@ def generate_large_area(
 
     total_tiles = tiles_per_axis * tiles_per_axis
     tile_records: List[Dict[str, object]] = []
-    completed = 0
     logging.info(
         "Processing %d tiles (tile radius %.2f m) to cover %.2f m query radius",
         total_tiles,
@@ -154,53 +142,53 @@ def generate_large_area(
         radius_m,
     )
 
-    for row_idx, y_offset in enumerate(y_offsets):
-        tile_lat = lat + (y_offset / meters_lat)
-        for col_idx, x_offset in enumerate(x_offsets):
-            tile_lon = lon + (x_offset / meters_lon)
-            tile_output = tiles_root / f"tile_r{row_idx:02d}_c{col_idx:02d}"
-            tile_output.mkdir(parents=True, exist_ok=True)
-            logging.info(
-                "Tile r%02d c%02d centered at (%.6f, %.6f) with radius %.2f m",
-                row_idx,
-                col_idx,
-                tile_lat,
-                tile_lon,
-                tile_radius,
-            )
-            run_generation(
-                lat=tile_lat,
-                lon=tile_lon,
-                radius_m=tile_radius,
-                resolution=resolution,
-                output_dir=tile_output,
-                overpass_url=overpass_url,
-                requests_module=requests_module,
-            )
+    with tqdm(total=total_tiles, desc="Tiles", unit="tile") as progress:
+        for row_idx, y_offset in enumerate(y_offsets):
+            tile_lat = lat + (y_offset / meters_lat)
+            for col_idx, x_offset in enumerate(x_offsets):
+                tile_lon = lon + (x_offset / meters_lon)
+                tile_output = tiles_root / f"tile_r{row_idx:02d}_c{col_idx:02d}"
+                tile_output.mkdir(parents=True, exist_ok=True)
+                logging.info(
+                    "Tile r%02d c%02d centered at (%.6f, %.6f) with radius %.2f m",
+                    row_idx,
+                    col_idx,
+                    tile_lat,
+                    tile_lon,
+                    tile_radius,
+                )
+                run_generation(
+                    lat=tile_lat,
+                    lon=tile_lon,
+                    radius_m=tile_radius,
+                    resolution=resolution,
+                    output_dir=tile_output,
+                    overpass_url=overpass_url,
+                    requests_module=requests_module,
+                )
 
-            metadata_path = tile_output / "metadata.json"
-            buildings_geojson = tile_output / "buildings.geojson"
-            semantic_map = tile_output / "semantic_map.npy"
+                metadata_path = tile_output / "metadata.json"
+                buildings_geojson = tile_output / "buildings.geojson"
+                semantic_map = tile_output / "semantic_map.npy"
 
-            tile_info = {
-                "row": row_idx,
-                "col": col_idx,
-                "center": {"lat": tile_lat, "lon": tile_lon},
-                "radius_m": tile_radius,
-                "output_dir": str(tile_output),
-                "metadata_path": str(metadata_path),
-                "buildings_geojson": str(buildings_geojson),
-                "semantic_map": str(semantic_map),
-            }
+                tile_info = {
+                    "row": row_idx,
+                    "col": col_idx,
+                    "center": {"lat": tile_lat, "lon": tile_lon},
+                    "radius_m": tile_radius,
+                    "output_dir": str(tile_output),
+                    "metadata_path": str(metadata_path),
+                    "buildings_geojson": str(buildings_geojson),
+                    "semantic_map": str(semantic_map),
+                }
 
-            if metadata_path.exists():
-                with metadata_path.open("r", encoding="utf-8") as f:
-                    metadata = json.load(f)
-                tile_info["metadata"] = metadata
+                if metadata_path.exists():
+                    with metadata_path.open("r", encoding="utf-8") as f:
+                        metadata = json.load(f)
+                    tile_info["metadata"] = metadata
 
-            tile_records.append(tile_info)
-            completed += 1
-            _progress_bar(completed, total_tiles)
+                tile_records.append(tile_info)
+                progress.update(1)
 
     combined_map_path, color_path = _combine_semantic_maps(
         tile_records, tiles_per_axis, output_dir
