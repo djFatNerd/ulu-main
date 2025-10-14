@@ -1,5 +1,5 @@
 """Utilities for working with OpenStreetMap semantic datasets."""
-from tools.scripts.generate_semantic_dataset import (  # noqa: F401
+from .generate_semantic_dataset import (  # noqa: F401
     CLASS_TO_ID,
     DEFAULT_OVERPASS_FALLBACKS,
     DRAW_ORDER,
@@ -21,3 +21,6 @@ from tools.scripts.generate_semantic_dataset import (  # noqa: F401
     meters_per_degree_lon,
     rasterize_semantics,
 )
+
+# Re-export the module itself for callers that expect the historical layout.
+from . import generate_semantic_dataset  # noqa: F401  (re-export for compatibility)
