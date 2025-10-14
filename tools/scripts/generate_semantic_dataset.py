@@ -36,6 +36,10 @@ ROAD_WIDTHS = {
     "traffic": 12.0,
 }
 
+# Minimum hole size (in pixel units) that we preserve inside buildings.
+# Smaller voids are assumed to be artifacts and will be filled.
+MIN_BUILDING_HOLE_PIXELS = 16
+
 
 # ---------------------------------------------------------------------------
 # Building classification helpers
@@ -480,7 +484,15 @@ def rasterize_semantics(
                         continue
                     exterior = [to_pixel(pt) for pt in part.exterior.coords]
                     draw.polygon(exterior, fill=class_id)
+                    min_hole_area = (resolution ** 2) * MIN_BUILDING_HOLE_PIXELS
                     for interior in part.interiors:
+                        if class_name == "building":
+                            hole_polygon = Polygon(interior)
+                            if not hole_polygon.is_valid:
+                                hole_polygon = hole_polygon.buffer(0)
+                            hole_area = abs(hole_polygon.area) if not hole_polygon.is_empty else 0.0
+                            if hole_area < min_hole_area:
+                                continue
                         hole = [to_pixel(pt) for pt in interior.coords]
                         draw.polygon(hole, fill=CLASS_TO_ID["ground"])
 
