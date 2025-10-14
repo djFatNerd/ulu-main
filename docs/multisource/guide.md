@@ -1,0 +1,123 @@
+# Multisource Semantic Dataset Workflow
+
+The multisource workflow augments the existing OpenStreetMap (OSM) rasterization
+pipeline with external points-of-interest providers. It produces enriched
+GeoJSON metadata that combines OSM building footprints with provider attributes
+such as official names, category hierarchies, ratings, and opening hours.
+
+## Components
+
+- `tools/multisource/generate_semantic_dataset_enriched.py` orchestrates the
+  pipeline. It reuses the `tools.osm` rasterization utilities to generate the
+  semantic raster and building features, then performs centroid-based lookups
+  against configured providers.
+- Providers are pluggable. The initial implementation includes:
+  - **OSM only** (`--provider osm`): preserves the original OSM labels without
+    external enrichment.
+  - **Google Places only** (`--provider google`): uses OSM footprints for
+    geometry but derives categories entirely from Google types.
+  - **Hybrid OSM + Google** (`--provider osm_google`, default): merges OSM
+    building classifications with Google types to build a combined
+    primary-secondary-tertiary category path.
+
+## Dependencies and configuration
+
+Install the standard dependencies plus the Google Places client:
+
+```bash
+pip install -r requirements.txt
+```
+
+Set the Google Maps Platform key via an environment variable or CLI flag:
+
+```bash
+export GOOGLE_MAPS_API_KEY="<your-api-key>"
+# or pass --google-api-key directly when invoking the script
+```
+
+Example invocation that merges OSM and Google metadata:
+
+```bash
+python tools/multisource/generate_semantic_dataset_enriched.py \
+    40.7580 -73.9855 1000 \
+    --resolution 1.0 \
+    --output ./times_square_enriched \
+    --provider osm_google \
+    --request-sleep 0.5 \
+    --match-distance 30
+```
+
+To opt into Google-only classifications (retaining OSM footprints but not the
+OSM semantic labels):
+
+```bash
+python tools/multisource/generate_semantic_dataset_enriched.py \
+    40.7580 -73.9855 1000 \
+    --provider google
+```
+
+If you need to fall back to an OSM-only workflow while keeping the enriched
+schema for downstream compatibility:
+
+```bash
+python tools/multisource/generate_semantic_dataset_enriched.py \
+    40.7580 -73.9855 1000 \
+    --provider osm
+```
+
+## Output schema additions
+
+The enriched GeoJSON augments each building feature with:
+
+- `enriched_primary_label`, `enriched_secondary_label`,
+  `enriched_tertiary_label`, and `enriched_category_path` describing the merged
+  category hierarchy. Provenance is tracked via `enriched_category_provenance`
+  (`osm_only`, `provider_only`, or `osm+provider`).
+- Provider metadata (`enriched_name`, `enriched_rating`,
+  `enriched_rating_count`, `enriched_opening_hours`) with per-field provenance
+  flags so downstream systems know whether a value came from Google, OSM, or is
+  absent.
+- Diagnostic attributes such as `provider_place_id`, `provider_distance_m`, and
+  `provider_confidence` to expose the spatial matching status.
+
+`metadata.json` includes an `enrichment` block summarizing the provider mode,
+match rate, fields added, and whether OSM labels were used during category
+composition.
+
+## Rate limiting and quota management
+
+External providers enforce strict quotas. The CLI exposes `--request-sleep`
+(default `0.2` seconds) to throttle requests and avoid 429 errors. Increase the
+sleep duration for large areas or when using shared API keys. The Google Places
+API also limits the number of nearby searches per day; consult your quota in the
+Google Cloud console and adjust the radius (`--provider-radius`) or scope of
+your queries accordingly.
+
+## Privacy and responsible usage
+
+- Do not store or redistribute personally identifiable information (PII). The
+  enrichment step only records business-facing metadata surfaced by the provider
+  APIs.
+- Respect the **Google Maps Platform Terms of Service** and **OpenStreetMap
+  usage policy**. Some jurisdictions restrict combining datasets; review local
+  regulations before deployment.
+- Cache provider responses responsibly. If you persist raw provider payloads
+  (`provider_raw`), secure them and avoid sharing beyond teams covered by the
+  provider agreements.
+
+## Attribution requirements
+
+- Retain the standard OpenStreetMap attribution wherever the geometry or OSM
+  tags are displayed or redistributed.
+- Follow Google Maps attribution guidelines when any Google-derived fields
+  (names, ratings, opening hours, etc.) are displayed. Include "Data © Google"
+  or the attribution string required for your contract.
+- Document downstream usage so that consumers of the enriched dataset know that
+  third-party terms apply to the provider-specific fields.
+
+## Extending to new providers
+
+The provider layer is pluggable—implement a subclass of `ProviderBase` that
+returns a `ProviderResult`. You can use the `NullProvider` as a template for
+providers that rely exclusively on OSM or open datasets. When adding new
+providers, update this guide with rate-limit guidance and attribution rules.
