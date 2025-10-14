@@ -1,9 +1,8 @@
 # Semantic Map Dataset Toolkit
 
 This repository contains a single-purpose toolkit for generating 1 m semantic
-rasters and hierarchical building metadata from OpenStreetMap (OSM). It is a
-minimal extraction of the original VIRL project, retaining only the components
-required for offline semantic dataset creation.
+rasters and hierarchical building metadata from OpenStreetMap (OSM). It focuses
+exclusively on the components required for offline semantic dataset creation.
 
 ## Contents
 
@@ -33,5 +32,4 @@ required for offline semantic dataset creation.
 ## License
 
 This repository redistributes only original code authored for the semantic
-dataset workflow. Consult the upstream VIRL project for licensing terms related
-to any remaining files.
+dataset workflow. Refer to the repository license for additional details.

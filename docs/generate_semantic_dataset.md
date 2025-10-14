@@ -2,11 +2,11 @@
 
 This document describes the `tools/scripts/generate_semantic_dataset.py` script,
 which assembles 1 m semantic rasters and multi-level building labels for a
-user-defined circular region.
+user-defined square region.
 
 ## Overview
 
-Given a center latitude/longitude and a radius (in meters), the script queries
+Given a center latitude/longitude and a half side length (in meters), the script queries
 OpenStreetMap via the Overpass API to download vector features for buildings,
 land-use, vegetation, water, and roads. It then:
 
@@ -58,8 +58,9 @@ python tools/scripts/generate_semantic_dataset.py \
 
 - `<latitude>`: Decimal latitude of the region center.
 - `<longitude>`: Decimal longitude of the region center.
-- `<radius_meters>`: Radius of the circular AOI in meters. The raster covers a
-  square of side length `2 * radius_meters` centered on the provided point.
+- `<radius_meters>`: Half side length of the square AOI in meters. The raster
+  covers a square of side length `2 * radius_meters` centered on the provided
+  point.
 
 ### Optional arguments
 
@@ -97,9 +98,11 @@ The output directory contains:
 - Cache raw Overpass responses by saving `metadata.json` and `buildings.geojson`
   under region-specific names (e.g., geohash) so you can rerun rasterization
   without re-downloading vectors.
-- Split large areas into overlapping circles to stay within Overpass result
+- Split large areas into overlapping squares to stay within Overpass result
   limits (~50 000 elements). The `radius` argument controls the tile size.
-- Consider running a private Overpass server when generating national or
-  continent-scale datasets to avoid public API rate limits.
+- Consider running a private Overpass server—or supplying a mirror via
+  `--overpass-url`. The script will automatically fall back to a set of public
+  mirrors when the primary endpoint returns transient errors, but a dedicated
+  instance is still recommended for heavy workloads.
 - Extend the classification mappings in the script to refine the building
   taxonomy for your target regions or to incorporate local zoning datasets.

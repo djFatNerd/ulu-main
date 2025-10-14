@@ -1,4 +1,4 @@
-"""Generate semantic maps and building taxonomies for a circular area.
+"""Generate semantic maps and building taxonomies for a square area.
 
 This script queries OpenStreetMap via the Overpass API, rasterizes semantic
 classes at 1 m resolution (configurable), and produces a GeoJSON file with
@@ -10,8 +10,11 @@ import argparse
 import json
 import logging
 import math
+import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+from semantic_palette import SEMANTIC_COLOR_PALETTE
 
 # ---------------------------------------------------------------------------
 # Semantic configuration
@@ -33,6 +36,16 @@ ROAD_WIDTHS = {
     "default": 6.0,
     "traffic": 12.0,
 }
+
+# Minimum hole size (in pixel units) that we preserve inside buildings.
+# Smaller voids are assumed to be artifacts and will be filled.
+MIN_BUILDING_HOLE_PIXELS = 16
+
+
+DEFAULT_OVERPASS_FALLBACKS = [
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +326,49 @@ def build_overpass_query(bbox: Tuple[float, float, float, float]) -> str:
     """
 
 
+def _build_overpass_candidates(primary_url: str) -> List[str]:
+    urls = [primary_url]
+    for candidate in DEFAULT_OVERPASS_FALLBACKS:
+        if candidate not in urls:
+            urls.append(candidate)
+    return urls
+
+
 def download_osm(
-    bbox: Tuple[float, float, float, float], overpass_url: str, requests_module
+    bbox: Tuple[float, float, float, float], overpass_url: str, requests_module, retries: int = 3
 ) -> List[dict]:
     query = build_overpass_query(bbox)
-    response = requests_module.post(overpass_url, data=query.encode("utf-8"), timeout=300)
-    response.raise_for_status()
-    payload = response.json()
-    return payload.get("elements", [])
+    last_error: Optional[Exception] = None
+    urls = _build_overpass_candidates(overpass_url)
+    RequestException = requests_module.exceptions.RequestException
+
+    for url_index, url in enumerate(urls):
+        for attempt in range(1, retries + 1):
+            try:
+                response = requests_module.post(url, data=query.encode("utf-8"), timeout=300)
+                response.raise_for_status()
+                payload = response.json()
+                logging.info("Downloaded OSM data from %s", url)
+                return payload.get("elements", [])
+            except RequestException as exc:
+                last_error = exc
+                logging.warning(
+                    "Attempt %d/%d to download OSM data from %s failed: %s",
+                    attempt,
+                    retries,
+                    url,
+                    exc,
+                )
+                if attempt < retries:
+                    # Basic linear backoff to give the Overpass API time to recover.
+                    sleep_seconds = min(30, 5 * attempt)
+                    time.sleep(sleep_seconds)
+        if url_index < len(urls) - 1:
+            logging.info("Falling back to alternate Overpass endpoint %s", urls[url_index + 1])
+
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Failed to download OSM data and no error was captured")
 
 
 def element_to_geometry(element: dict) -> Optional[Any]:
@@ -478,21 +526,32 @@ def rasterize_semantics(
                         continue
                     exterior = [to_pixel(pt) for pt in part.exterior.coords]
                     draw.polygon(exterior, fill=class_id)
+                    min_hole_area = (resolution ** 2) * MIN_BUILDING_HOLE_PIXELS
                     for interior in part.interiors:
+                        if class_name == "building":
+                            hole_polygon = Polygon(interior)
+                            if not hole_polygon.is_valid:
+                                hole_polygon = hole_polygon.buffer(0)
+                            hole_area = abs(hole_polygon.area) if not hole_polygon.is_empty else 0.0
+                            if hole_area < min_hole_area:
+                                continue
                         hole = [to_pixel(pt) for pt in interior.coords]
                         draw.polygon(hole, fill=CLASS_TO_ID["ground"])
 
     np = get_numpy()
     array = np.array(image, dtype=np.uint8)
 
-    yy, xx = np.mgrid[0:size, 0:size]
-    center = (size - 1) / 2.0
-    distances = np.sqrt(((xx - center) * resolution) ** 2 + ((yy - center) * resolution) ** 2)
-    array[distances > radius_m] = CLASS_TO_ID["ground"]
-
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, array)
     Image.fromarray(array, mode="L").save(output_path.with_suffix(".png"))
+
+    # Create a colored visualization using the fixed palette.
+    max_class_id = max(CLASS_TO_ID.values())
+    palette = np.zeros((max_class_id + 1, 3), dtype=np.uint8)
+    for class_name, class_id in CLASS_TO_ID.items():
+        palette[class_id] = SEMANTIC_COLOR_PALETTE[class_name]
+    colored = palette[array]
+    Image.fromarray(colored, mode="RGB").save(output_path.with_name("semantic_map_colored.png"))
     return output_path
 
 
@@ -505,9 +564,16 @@ def build_building_features(
     projector,
     radius_m: float,
 ) -> List[dict]:
-    _, Point, Polygon, mapping = get_shapely_geometry()
+    _, _, Polygon, mapping = get_shapely_geometry()
     features = []
-    circle = Point(0, 0).buffer(radius_m)
+    extent = Polygon(
+        [
+            (-radius_m, -radius_m),
+            (radius_m, -radius_m),
+            (radius_m, radius_m),
+            (-radius_m, radius_m),
+        ]
+    )
     for element in buildings:
         geom = element_to_geometry(element)
         if geom is None or not isinstance(geom, Polygon):
@@ -515,7 +581,7 @@ def build_building_features(
         projected = projector(geom)
         if projected.is_empty:
             continue
-        intersection = projected.intersection(circle)
+        intersection = projected.intersection(extent)
         if intersection.is_empty:
             continue
 
@@ -532,7 +598,8 @@ def build_building_features(
                 properties[key.replace(":", "_")] = tags[key]
 
         properties["area_m2"] = float(intersection.area)
-        centroid = geom.centroid
+        centroid_geom = intersection.centroid if not intersection.is_empty else geom.centroid
+        centroid = centroid_geom
         properties["centroid_lat"] = centroid.y
         properties["centroid_lon"] = centroid.x
 
@@ -633,7 +700,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate semantic map and building taxonomy from OSM data.")
     parser.add_argument("lat", type=float, help="Center latitude in decimal degrees")
     parser.add_argument("lon", type=float, help="Center longitude in decimal degrees")
-    parser.add_argument("radius", type=float, help="Radius in meters")
+    parser.add_argument(
+        "radius",
+        type=float,
+        help="Half side length of the square region in meters",
+    )
     parser.add_argument(
         "--resolution",
         type=float,
