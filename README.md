@@ -30,11 +30,11 @@ exclusively on the components required for offline semantic dataset creation.
    ```
 2. Choose the script that matches your area of interest:
    - For **single tiles or modest regions** (that fit within Overpass limits),
-     run `generate_semantic_dataset.py` directly, or execute the convenience
+     run `generate_semantic_dataset.py` as a module, or execute the convenience
      wrapper:
        ```bash
        # direct Python invocation
-       python tools/scripts/generate_semantic_dataset.py \
+       python -m tools.osm.generate_semantic_dataset \
            40.7580 -73.9855 1000 \
            --resolution 1.0 \
            --output ./times_square
@@ -48,7 +48,7 @@ exclusively on the components required for offline semantic dataset creation.
      A helper shell script is also provided:
        ```bash
        # direct Python invocation
-       python tools/scripts/generate_semantic_dataset_large_area.py \
+       python -m tools.osm.generate_semantic_dataset_large_area \
            40.7580 -73.9855 6000 \
            --max-radius 1500 \
            --resolution 1.0 \
@@ -58,9 +58,9 @@ exclusively on the components required for offline semantic dataset creation.
        ./scripts/generate_times_square_large.sh
        ```
 3. Review the outputs in the chosen directory. The standard script documentation
-   lives in `docs/generate_semantic_dataset.md`. The tiling workflow and
+   lives in `docs/osm/generate_semantic_dataset.md`. The tiling workflow and
    combined outputs are described in
-   `docs/generate_semantic_dataset_large_area.md`.
+   `docs/osm/generate_semantic_dataset_large_area.md`.
 
 ## Multisource enrichment workflow
 
