@@ -11,4 +11,5 @@ SEMANTIC_COLOR_PALETTE: Dict[str, Tuple[int, int, int]] = {
     "building": (255, 165, 0),      # Orange
     "road": (128, 128, 128),        # Gray
     "traffic_road": (0, 0, 0),      # Black
+    "bridge": (218, 165, 32),       # Goldenrod
 }
