@@ -13,6 +13,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from semantic_palette import SEMANTIC_COLOR_PALETTE
+
 # ---------------------------------------------------------------------------
 # Semantic configuration
 # ---------------------------------------------------------------------------
@@ -493,6 +495,14 @@ def rasterize_semantics(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, array)
     Image.fromarray(array, mode="L").save(output_path.with_suffix(".png"))
+
+    # Create a colored visualization using the fixed palette.
+    max_class_id = max(CLASS_TO_ID.values())
+    palette = np.zeros((max_class_id + 1, 3), dtype=np.uint8)
+    for class_name, class_id in CLASS_TO_ID.items():
+        palette[class_id] = SEMANTIC_COLOR_PALETTE[class_name]
+    colored = palette[array]
+    Image.fromarray(colored, mode="RGB").save(output_path.with_name("semantic_map_colored.png"))
     return output_path
 
 
