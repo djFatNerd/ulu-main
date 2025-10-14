@@ -6,24 +6,21 @@ exclusively on the components required for offline semantic dataset creation.
 
 ## Contents
 
-- `tools/osm/` – Python package with the semantic dataset generators and
-  palette helpers.
-  - `generate_semantic_dataset.py` – Command-line script that queries
-    OSM/Overpass, rasterizes semantic maps, and exports building taxonomies.
-  - `generate_semantic_dataset_large_area.py` – Helper CLI that tiles large
-    queries into manageable chunks, merges outputs, and reports per-tile
-    progress.
-  - `semantic_palette.py` – Shared semantic color palette utilities.
-  - `README.md` – Directory overview.
-- `docs/osm/` – Documentation for the OSM tooling, including:
-  - `dataset_curation_plan.md` – Goals and workflow summary for dataset
-    creation.
-  - `generate_semantic_dataset.md` – Detailed usage guide for the core CLI.
-  - `generate_semantic_dataset_large_area.md` – Companion guide for the
-    large-area tiling workflow.
-  - `README.md` – Documentation overview.
-- `scripts/` – Convenience shell launchers that wrap the Python CLIs.
-- `requirements.txt` – Minimal Python dependencies needed to run the scripts.
+- `tools/scripts/generate_semantic_dataset.py` – Command-line script that queries
+  OSM/Overpass, rasterizes semantic maps, and exports building taxonomies.
+- `tools/scripts/generate_semantic_dataset_large_area.py` – Helper CLI that
+  tiles large queries into manageable chunks, merges outputs, and reports
+  per-tile progress.
+- `tools/multisource/generate_semantic_dataset_enriched.py` – Multisource CLI
+  that reuses the OSM rasterization pipeline and enriches building metadata
+  with external providers such as Google Places.
+- `docs/generate_semantic_dataset.md` – Detailed usage guide describing inputs,
+  outputs, dependencies, and scaling recommendations.
+- `docs/generate_semantic_dataset_large_area.md` – Companion guide for the
+  large-area tiling workflow.
+- `docs/multisource/guide.md` – Multisource enrichment workflow, rate limits,
+  privacy guidance, and attribution requirements.
+- `requirements.txt` – Minimal Python dependencies needed to run the script.
 
 ## Quick Start
 
@@ -64,6 +61,26 @@ exclusively on the components required for offline semantic dataset creation.
    lives in `docs/osm/generate_semantic_dataset.md`. The tiling workflow and
    combined outputs are described in
    `docs/osm/generate_semantic_dataset_large_area.md`.
+
+## Multisource enrichment workflow
+
+When you need provider-sourced attributes (official names, Google category
+hierarchies, ratings, opening hours), run the multisource CLI instead of the
+OSM-only scripts:
+
+```bash
+python tools/multisource/generate_semantic_dataset_enriched.py \
+    40.7580 -73.9855 1000 \
+    --provider osm_google \
+    --output ./times_square_enriched
+```
+
+This script shares the same rasterization pipeline but augments the building
+GeoJSON with provider-specific fields and provenance flags. See
+`docs/multisource/guide.md` for rate limiting, privacy guidance, and examples of
+switching between OSM-only, Google-only, and hybrid modes. Unlike the original
+workflow, the enriched CLI stores provider responses (including IDs and match
+confidence) so downstream users can trace the origin of each attribute.
 
 ## License
 
