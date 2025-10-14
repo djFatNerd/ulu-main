@@ -101,6 +101,10 @@ The output directory contains:
   without re-downloading vectors.
 - Split large areas into overlapping squares to stay within Overpass result
   limits (~50 000 elements). The `radius` argument controls the tile size.
+- When a single square would exceed those limits, switch to
+  `generate_semantic_dataset_large_area.py`. The helper script must be called
+  explicitly and will orchestrate per-tile calls to this base script while
+  preserving seamless coverage across tile boundaries.
 - Consider running a private Overpass server—or supplying a mirror via
   `--overpass-url`. The script will automatically fall back to a set of public
   mirrors when the primary endpoint returns transient errors, but a dedicated

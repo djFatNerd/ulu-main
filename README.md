@@ -23,16 +23,29 @@ exclusively on the components required for offline semantic dataset creation.
    ```bash
    pip install -r requirements.txt
    ```
-2. Generate a dataset tile by providing latitude, longitude, and radius (meters):
-   ```bash
-   python tools/scripts/generate_semantic_dataset.py \
-       40.7580 -73.9855 1000 \
-       --resolution 1.0 \
-       --output ./times_square
-   ```
-3. Review the outputs in the chosen directory. See the documentation in
-   `docs/generate_semantic_dataset.md` for advanced configuration and data
-   schema details.
+2. Choose the script that matches your area of interest:
+   - For **single tiles or modest regions** (that fit within Overpass limits),
+     run `generate_semantic_dataset.py` directly:
+       ```bash
+       python tools/scripts/generate_semantic_dataset.py \
+           40.7580 -73.9855 1000 \
+           --resolution 1.0 \
+           --output ./times_square
+       ```
+   - For **very large regions** that may exceed API or memory limits, run the
+     tiling helper `generate_semantic_dataset_large_area.py`. It does **not**
+     run automatically—invoke it explicitly when you know the query is large:
+       ```bash
+       python tools/scripts/generate_semantic_dataset_large_area.py \
+           40.7580 -73.9855 6000 \
+           --max-radius 1500 \
+           --resolution 1.0 \
+           --output ./times_square_large
+       ```
+3. Review the outputs in the chosen directory. The standard script documentation
+   lives in `docs/generate_semantic_dataset.md`. The tiling workflow and
+   combined outputs are described in
+   `docs/generate_semantic_dataset_large_area.md`.
 
 ## License
 
