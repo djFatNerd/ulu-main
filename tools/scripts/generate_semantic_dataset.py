@@ -13,6 +13,8 @@ import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from semantic_palette import SEMANTIC_COLOR_PALETTE
+
 # ---------------------------------------------------------------------------
 # Semantic configuration
 # ---------------------------------------------------------------------------
@@ -33,6 +35,10 @@ ROAD_WIDTHS = {
     "default": 6.0,
     "traffic": 12.0,
 }
+
+# Minimum hole size (in pixel units) that we preserve inside buildings.
+# Smaller voids are assumed to be artifacts and will be filled.
+MIN_BUILDING_HOLE_PIXELS = 16
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +484,15 @@ def rasterize_semantics(
                         continue
                     exterior = [to_pixel(pt) for pt in part.exterior.coords]
                     draw.polygon(exterior, fill=class_id)
+                    min_hole_area = (resolution ** 2) * MIN_BUILDING_HOLE_PIXELS
                     for interior in part.interiors:
+                        if class_name == "building":
+                            hole_polygon = Polygon(interior)
+                            if not hole_polygon.is_valid:
+                                hole_polygon = hole_polygon.buffer(0)
+                            hole_area = abs(hole_polygon.area) if not hole_polygon.is_empty else 0.0
+                            if hole_area < min_hole_area:
+                                continue
                         hole = [to_pixel(pt) for pt in interior.coords]
                         draw.polygon(hole, fill=CLASS_TO_ID["ground"])
 
@@ -493,6 +507,14 @@ def rasterize_semantics(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     np.save(output_path, array)
     Image.fromarray(array, mode="L").save(output_path.with_suffix(".png"))
+
+    # Create a colored visualization using the fixed palette.
+    max_class_id = max(CLASS_TO_ID.values())
+    palette = np.zeros((max_class_id + 1, 3), dtype=np.uint8)
+    for class_name, class_id in CLASS_TO_ID.items():
+        palette[class_id] = SEMANTIC_COLOR_PALETTE[class_name]
+    colored = palette[array]
+    Image.fromarray(colored, mode="RGB").save(output_path.with_name("semantic_map_colored.png"))
     return output_path
 
 
