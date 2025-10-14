@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-python tools/scripts/generate_semantic_dataset_large_area.py \
+python -m tools.osm.generate_semantic_dataset_large_area \
     40.7580 -73.9855 6000 \
     --max-radius 1500 \
     --resolution 1.0 \

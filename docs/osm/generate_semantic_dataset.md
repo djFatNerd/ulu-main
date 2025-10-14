@@ -1,6 +1,6 @@
 # Semantic Dataset Generator
 
-This document describes the `tools/scripts/generate_semantic_dataset.py` script,
+This document describes the `tools/osm/generate_semantic_dataset.py` script,
 which assembles 1 m semantic rasters and multi-level building labels for a
 user-defined square region.
 
@@ -27,11 +27,11 @@ Google API calls.
 
 ## Requirements
 
-The script depends on packages already listed in `requirement.txt`, plus
+The script depends on packages already listed in `requirements.txt`, plus
 Shapely, Pillow, NumPy, and Requests:
 
 ```bash
-pip install -r requirement.txt
+pip install -r requirements.txt
 ```
 
 If you prefer a minimal installation, the essential dependencies are:
@@ -47,7 +47,7 @@ pip install numpy requests pillow shapely
 ## Usage
 
 ```bash
-python tools/scripts/generate_semantic_dataset.py \
+python -m tools.osm.generate_semantic_dataset \
     <latitude> <longitude> <radius_meters> \
     --resolution 1.0 \
     --output /path/to/output_dir \
@@ -102,9 +102,10 @@ The output directory contains:
 - Split large areas into overlapping squares to stay within Overpass result
   limits (~50 000 elements). The `radius` argument controls the tile size.
 - When a single square would exceed those limits, switch to
-  `generate_semantic_dataset_large_area.py`. The helper script must be called
-  explicitly and will orchestrate per-tile calls to this base script while
-  preserving seamless coverage across tile boundaries.
+  `tools/osm/generate_semantic_dataset_large_area.py`. Invoke it via
+  `python -m tools.osm.generate_semantic_dataset_large_area` to orchestrate
+  per-tile calls to this base script while preserving seamless coverage across
+  tile boundaries.
 - Consider running a private Overpass server—or supplying a mirror via
   `--overpass-url`. The script will automatically fall back to a set of public
   mirrors when the primary endpoint returns transient errors, but a dedicated

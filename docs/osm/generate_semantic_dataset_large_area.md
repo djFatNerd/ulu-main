@@ -1,15 +1,11 @@
 # Large-Area Semantic Dataset Generator
 
-The `tools/scripts/generate_semantic_dataset_large_area.py` helper script wraps
-`generate_semantic_dataset.py` to support very large regions. It does **not**
+The `tools/osm/generate_semantic_dataset_large_area.py` helper script wraps
+`tools/osm/generate_semantic_dataset.py` to support very large regions. It does **not**
 run automatically; you should choose it when the requested area risks exceeding
 Overpass limits or local memory. The helper automatically splits the query
 square into smaller tiles, renders each tile sequentially, and then stitches the
 semantic rasters and building GeoJSON back together.
-`generate_semantic_dataset.py` to support very large regions. It automatically
-splits a query square into smaller tiles, renders each tile sequentially, and
-then stitches the semantic rasters and building GeoJSON back together.
-
 ## Why use the tiling helper?
 
 - **Stay within Overpass limits.** Very large bounding boxes can exceed the
@@ -24,13 +20,16 @@ then stitches the semantic rasters and building GeoJSON back together.
 ## Usage
 
 ```bash
-python tools/scripts/generate_semantic_dataset_large_area.py \
+python -m tools.osm.generate_semantic_dataset_large_area \
     <latitude> <longitude> <radius_meters> \
     --max-radius 1500 \
     --resolution 1.0 \
     --output /path/to/output_dir \
     --log-level INFO
 ```
+
+> **Dependency**: Install `tqdm` (`pip install tqdm`) to enable the progress
+> indicator used by the tiling helper.
 
 ### Positional arguments
 
@@ -56,7 +55,7 @@ python tools/scripts/generate_semantic_dataset_large_area.py \
 The output directory includes both per-tile and merged artifacts:
 
 - `tiles/tile_rXX_cYY/…` – Each tile contains the same outputs produced by
-  `generate_semantic_dataset.py` (semantic rasters, colored previews, building
+  `tools/osm/generate_semantic_dataset.py` (semantic rasters, colored previews, building
   metadata, and tile-level metadata JSON).
 - `combined/semantic_map.npy` – Full-resolution semantic raster assembled from
   all tiles. The helper also writes `semantic_map.png` (grayscale) and

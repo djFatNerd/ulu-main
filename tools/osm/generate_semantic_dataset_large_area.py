@@ -8,9 +8,7 @@ import math
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from tqdm import tqdm
-
-from generate_semantic_dataset import (
+from .generate_semantic_dataset import (
     CLASS_TO_ID,
     compute_bbox,
     get_numpy,
@@ -20,7 +18,17 @@ from generate_semantic_dataset import (
     meters_per_degree_lon,
     run_generation,
 )
-from semantic_palette import SEMANTIC_COLOR_PALETTE
+from .semantic_palette import SEMANTIC_COLOR_PALETTE
+
+
+def get_tqdm():
+    try:
+        from tqdm import tqdm
+    except ImportError as exc:  # pragma: no cover - import guard
+        raise ImportError(
+            "tqdm is required for progress reporting. Install it via 'pip install tqdm'."
+        ) from exc
+    return tqdm
 
 
 def _tile_offsets(radius_m: float, max_tile_radius: float) -> Tuple[float, int, List[float], List[float]]:
@@ -142,6 +150,7 @@ def generate_large_area(
         radius_m,
     )
 
+    tqdm = get_tqdm()
     with tqdm(total=total_tiles, desc="Tiles", unit="tile") as progress:
         for row_idx, y_offset in enumerate(y_offsets):
             tile_lat = lat + (y_offset / meters_lat)
