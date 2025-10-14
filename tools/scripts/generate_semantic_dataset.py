@@ -42,10 +42,11 @@ CLASS_TO_ID = {
     "building": 3,
     "road": 4,
     "traffic_road": 5,
+    "bridge": 6,
 }
 
 # Draw order decides which class overwrites previous pixels.
-DRAW_ORDER = ["vegetation", "water", "road", "traffic_road", "building"]
+DRAW_ORDER = ["vegetation", "water", "road", "traffic_road", "bridge", "building"]
 
 # Default drawing widths in meters for linear features.
 ROAD_WIDTHS = {
@@ -56,6 +57,9 @@ ROAD_WIDTHS = {
 # Minimum hole size (in pixel units) that we preserve inside buildings.
 # Smaller voids are assumed to be artifacts and will be filled.
 MIN_BUILDING_HOLE_PIXELS = 16
+
+
+BRIDGE_FALSE_VALUES = {"no", "false", "0"}
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +421,32 @@ def element_to_geometry(element: dict) -> Optional[Any]:
     return line if line.is_valid and not line.is_empty else None
 
 
+def _is_truthy_bridge(value: Optional[str]) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, str):
+        return True
+    return value.lower() not in BRIDGE_FALSE_VALUES
+
+
+def is_bridge_structure(tags: Dict[str, str]) -> bool:
+    building_value = tags.get("building")
+    if building_value == "bridge":
+        return True
+
+    if building_value and _is_truthy_bridge(tags.get("bridge")):
+        return True
+
+    if tags.get("man_made") == "bridge" and "highway" not in tags:
+        return True
+
+    return False
+
+
 def classify_semantic(tags: Dict[str, str]) -> Optional[str]:
+    if is_bridge_structure(tags):
+        return "bridge"
+
     if "building" in tags:
         return "building"
 
@@ -538,7 +567,7 @@ def rasterize_semantics(
                     draw.polygon(exterior, fill=class_id)
                     min_hole_area = (resolution ** 2) * MIN_BUILDING_HOLE_PIXELS
                     for interior in part.interiors:
-                        if class_name == "building":
+                        if class_name in {"building", "bridge"}:
                             hole_polygon = Polygon(interior)
                             if not hole_polygon.is_valid:
                                 hole_polygon = hole_polygon.buffer(0)

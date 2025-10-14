@@ -83,6 +83,7 @@ The output directory contains:
   - `3`: building
   - `4`: road (residential, tertiary, service, etc.)
   - `5`: traffic road (primary, trunk, motorway classes)
+  - `6`: bridge decks and elevated structures mapped as buildings or man-made bridges
 - **`semantic_map.png`** – Quick-look visualization (grayscale values follow the
   same class IDs).
 - **`buildings.geojson`** – GeoJSON FeatureCollection. Each feature provides:

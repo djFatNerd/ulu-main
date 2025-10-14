@@ -8,8 +8,13 @@ exclusively on the components required for offline semantic dataset creation.
 
 - `tools/scripts/generate_semantic_dataset.py` – Command-line script that queries
   OSM/Overpass, rasterizes semantic maps, and exports building taxonomies.
+- `tools/scripts/generate_semantic_dataset_large_area.py` – Helper CLI that
+  tiles large queries into manageable chunks, merges outputs, and reports
+  per-tile progress.
 - `docs/generate_semantic_dataset.md` – Detailed usage guide describing inputs,
   outputs, dependencies, and scaling recommendations.
+- `docs/generate_semantic_dataset_large_area.md` – Companion guide for the
+  large-area tiling workflow.
 - `requirements.txt` – Minimal Python dependencies needed to run the script.
 
 ## Quick Start
