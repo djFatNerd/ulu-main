@@ -1,7 +1,7 @@
 # Offline Dataset Curation Plan
 
 ## Goals
-- Generate 1 m/pixel semantic rasters covering arbitrary circular regions provided by latitude, longitude, and radius.
+- Generate 1 m/pixel semantic rasters covering arbitrary square regions provided by latitude, longitude, and half side length.
 - Enrich every building footprint with multi-level usage labels (e.g., residential → apartment → public housing).
 - Support large-scale, offline curation by mirroring or replacing online data dependencies with reproducible local workflows.
 
@@ -15,14 +15,14 @@ Where the original online pipeline depended on proprietary services (e.g., Googl
 Batch workers can sweep tiles of imagery or panoramic datasets for supervision signals (e.g., perspective projections, road context) while respecting rate limits and local storage constraints.
 
 ## Semantic Raster Generation
-1. **Geometry Backbone**: For dense, license-friendly vector data, use OpenStreetMap (OSM) via Overpass API downloads or regional extracts. Query features within the target circle and categorize them into the six map classes (ground, vegetation, water, building, road, traffic road). Suggested tag mapping:
+1. **Geometry Backbone**: For dense, license-friendly vector data, use OpenStreetMap (OSM) via Overpass API downloads or regional extracts. Query features within the target square extent and categorize them into the six map classes (ground, vegetation, water, building, road, traffic road). Suggested tag mapping:
    - `landuse=grass`, `natural=wood`, `leisure=park` → vegetation
    - `natural=water`, `waterway=*` → water
    - `building=*` polygons → building
    - `highway=service/path/footway` → ground
    - `highway=residential/tertiary/...` → road
    - `highway=primary/trunk/motorway` + `junction=roundabout` → traffic road
-2. **Rasterization**: Convert clipped OSM geometries to a 1 m grid (e.g., using `rasterio.features.rasterize`). Ensure the raster extent spans the requested radius plus padding so that a user-specified 1 m resolution aligns with EPSG:3857 meters.
+2. **Rasterization**: Convert clipped OSM geometries to a 1 m grid (e.g., using `rasterio.features.rasterize`). Ensure the raster extent spans the requested half side length plus padding so that a user-specified 1 m resolution aligns with EPSG:3857 meters.
 3. **Gap Filling**: When OSM coverage is sparse, backfill using government open data (e.g., Microsoft Global ML Building Footprints, USGS 3DEP), or infer ground vs. vegetation using Sentinel-2 landcover classifiers.
 4. **Quality Checks**: Compare semantic tiles with panoramic or ground-truth samples captured in the same region to validate class consistency. Reuse existing heading sampling utilities from the offline cache to ensure viewpoints are comparable.
 
