@@ -16,6 +16,22 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from semantic_palette import SEMANTIC_COLOR_PALETTE
 
+
+# ---------------------------------------------------------------------------
+# Network configuration
+# ---------------------------------------------------------------------------
+
+# Public Overpass API mirrors that we can fall back to when the primary
+# endpoint is unavailable. Keeping the list close to the top of the module
+# makes it easy to maintain and prevents NameError issues when referenced in
+# helper functions further below.
+DEFAULT_OVERPASS_FALLBACKS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.ru/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+]
+
 # ---------------------------------------------------------------------------
 # Semantic configuration
 # ---------------------------------------------------------------------------
