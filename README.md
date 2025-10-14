@@ -6,9 +6,9 @@ exclusively on the components required for offline semantic dataset creation.
 
 ## Contents
 
-- `tools/scripts/generate_semantic_dataset.py` – Command-line script that queries
+- `tools/osm/generate_semantic_dataset.py` – Command-line script that queries
   OSM/Overpass, rasterizes semantic maps, and exports building taxonomies.
-- `tools/scripts/generate_semantic_dataset_large_area.py` – Helper CLI that
+- `tools/osm/generate_semantic_dataset_large_area.py` – Helper CLI that
   tiles large queries into manageable chunks, merges outputs, and reports
   per-tile progress.
 - `tools/multisource/generate_semantic_dataset_enriched.py` – Multisource CLI
@@ -81,6 +81,13 @@ GeoJSON with provider-specific fields and provenance flags. See
 switching between OSM-only, Google-only, and hybrid modes. Unlike the original
 workflow, the enriched CLI stores provider responses (including IDs and match
 confidence) so downstream users can trace the origin of each attribute.
+
+If you prefer a one-liner, use the bundled helper script (remember to export a
+`GOOGLE_MAPS_API_KEY` environment variable when required):
+
+```bash
+./scripts/generate_times_square_enriched.sh
+```
 
 ## License
 

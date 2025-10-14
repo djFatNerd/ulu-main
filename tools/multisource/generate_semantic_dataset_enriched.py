@@ -15,13 +15,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import sys
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-TOOLS_DIR = ROOT_DIR / "tools"
-SCRIPTS_DIR = TOOLS_DIR / "scripts"
-for path in (ROOT_DIR, TOOLS_DIR, SCRIPTS_DIR):
-    if str(path) not in sys.path:
-        sys.path.insert(0, str(path))
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-import tools.scripts.generate_semantic_dataset as osm_script
+import tools.osm.generate_semantic_dataset as osm_script
 from tools.osm import (
     CLASS_TO_ID,
     DEFAULT_OVERPASS_FALLBACKS,
