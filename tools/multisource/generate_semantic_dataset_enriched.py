@@ -38,6 +38,7 @@ from tools.osm import (
     element_to_geometry,
     get_requests,
     latlon_to_local_projector,
+    local_to_latlon_projector,
     rasterize_semantics,
 )
 
@@ -305,6 +306,7 @@ class OvertureBuildingsProvider(ProviderBase):
         name_fields: Sequence[str],
         auth_token: Optional[str],
         timeout: float,
+        proxy_url: Optional[str],
     ) -> None:
         if not base_url:
             raise ValueError("Overture base URL cannot be empty")
@@ -321,6 +323,22 @@ class OvertureBuildingsProvider(ProviderBase):
         self._timeout = timeout
         self._requests = get_requests()
         self._session = self._requests.Session()
+        self._session.trust_env = True
+        self._session.verify = self._requests.certs.where()
+
+        self._proxies: Dict[str, str] = {}
+        if proxy_url:
+            self._proxies = {"http": proxy_url, "https": proxy_url}
+        else:
+            env_proxies = self._requests.utils.get_environ_proxies(self._endpoint)
+            # urllib3 expects lowercase scheme keys; filter empty entries.
+            self._proxies = {
+                scheme: value
+                for scheme, value in env_proxies.items()
+                if value
+            }
+        if self._proxies:
+            self._session.proxies.update(self._proxies)
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
@@ -386,6 +404,7 @@ class OvertureBuildingsProvider(ProviderBase):
                 params=params,
                 headers=self._headers(),
                 timeout=self._timeout,
+                proxies=self._proxies or None,
             )
             response.raise_for_status()
         except self._requests.exceptions.RequestException as exc:
@@ -994,6 +1013,7 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     name_fields=args.overture_name_fields,
                     auth_token=args.overture_auth_token,
                     timeout=args.overture_timeout,
+                    proxy_url=args.overture_proxy,
                 )
             )
         elif name == "local_geojson":
@@ -1247,6 +1267,7 @@ def run_generation(
 
     bbox = compute_bbox(lat, lon, radius_m)
     projector = latlon_to_local_projector(lat, lon)
+    inverse_projector = local_to_latlon_projector(lat, lon)
 
     requests_module = get_requests()
     osm_script.DEFAULT_OVERPASS_FALLBACKS = list(fallback_overpass)
@@ -1281,7 +1302,7 @@ def run_generation(
     rasterize_semantics(class_geometries, resolution, radius_m, raster_output)
 
     LOGGER.info("Building metadata GeoJSON with enrichment")
-    features = build_building_features(buildings, projector, radius_m)
+    features = build_building_features(buildings, projector, inverse_projector, radius_m)
     enriched_features, provider_summary = enrich_features(features, provider, use_osm_labels)
 
     geojson = {
@@ -1443,6 +1464,14 @@ def parse_args() -> argparse.Namespace:
         help="HTTP timeout in seconds for Overture API requests",
     )
     parser.add_argument(
+        "--overture-proxy",
+        default=None,
+        help=(
+            "Optional HTTP(S) proxy URL used for Overture requests. "
+            "Defaults to the OVERTURE_PROXY environment variable when unset."
+        ),
+    )
+    parser.add_argument(
         "--provider-radius",
         type=float,
         default=50.0,
@@ -1577,6 +1606,12 @@ def main() -> None:
         args.google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
     if not args.overture_auth_token:
         args.overture_auth_token = os.getenv("OVERTURE_AUTH_TOKEN")
+    if not args.overture_proxy:
+        args.overture_proxy = os.getenv("OVERTURE_PROXY")
+    if args.overture_proxy:
+        args.overture_proxy = args.overture_proxy.strip()
+        if not args.overture_proxy:
+            args.overture_proxy = None
 
     configure_free_tier(args)
 

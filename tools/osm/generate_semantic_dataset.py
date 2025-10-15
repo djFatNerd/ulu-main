@@ -309,6 +309,22 @@ def latlon_to_local_projector(lat0: float, lon0: float):
     return lambda geom: transform_fn(_project, geom)
 
 
+def local_to_latlon_projector(lat0: float, lon0: float):
+    meters_lat = meters_per_degree_lat(lat0)
+    meters_lon = meters_per_degree_lon(lat0)
+    transform_fn = get_shapely_transform()
+
+    def _unproject(x, y, z=None):
+        np = get_numpy()
+        x_arr = np.asarray(x)
+        y_arr = np.asarray(y)
+        lon = lon0 + x_arr / meters_lon
+        lat = lat0 + y_arr / meters_lat
+        return lon, lat
+
+    return lambda geom: transform_fn(_unproject, geom)
+
+
 # ---------------------------------------------------------------------------
 # OSM extraction helpers
 # ---------------------------------------------------------------------------
@@ -601,9 +617,10 @@ def rasterize_semantics(
 def build_building_features(
     buildings: List[dict],
     projector,
+    inverse_projector,
     radius_m: float,
 ) -> List[dict]:
-    _, _, Polygon, mapping = get_shapely_geometry()
+    _, Point, Polygon, mapping = get_shapely_geometry()
     features = []
     extent = Polygon(
         [
@@ -637,10 +654,15 @@ def build_building_features(
                 properties[key.replace(":", "_")] = tags[key]
 
         properties["area_m2"] = float(intersection.area)
-        centroid_geom = intersection.centroid if not intersection.is_empty else geom.centroid
-        centroid = centroid_geom
-        properties["centroid_lat"] = centroid.y
-        properties["centroid_lon"] = centroid.x
+        if not intersection.is_empty:
+            centroid_local = intersection.centroid
+            centroid_geo = inverse_projector(Point(centroid_local.x, centroid_local.y))
+            properties["centroid_lat"] = centroid_geo.y
+            properties["centroid_lon"] = centroid_geo.x
+        else:
+            centroid = geom.centroid
+            properties["centroid_lat"] = centroid.y
+            properties["centroid_lon"] = centroid.x
 
         feature = {
             "type": "Feature",
@@ -668,6 +690,7 @@ def run_generation(
     logging.info("Computing bounding box and projection")
     bbox = compute_bbox(lat, lon, radius_m)
     projector = latlon_to_local_projector(lat, lon)
+    inverse_projector = local_to_latlon_projector(lat, lon)
 
     logging.info("Downloading OSM data from %s", overpass_url)
     elements = download_osm(bbox, overpass_url, requests_module)
@@ -700,7 +723,7 @@ def run_generation(
     rasterize_semantics(class_geometries, resolution, radius_m, raster_output)
 
     logging.info("Building metadata GeoJSON")
-    features = build_building_features(buildings, projector, radius_m)
+    features = build_building_features(buildings, projector, inverse_projector, radius_m)
     geojson = {
         "type": "FeatureCollection",
         "features": features,

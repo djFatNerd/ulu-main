@@ -161,8 +161,10 @@ enough for quick runs.
 
   If the public endpoint ever requires authentication, supply a token via
   `--overture-auth-token` or the `OVERTURE_AUTH_TOKEN` environment variable and
-  pass `--overture-timeout` to adjust network tolerance. The provider falls back
-  to OSM labels when Overture does not report categories.
+  pass `--overture-timeout` to adjust network tolerance. If your network
+  requires an HTTP proxy, configure it with `--overture-proxy` or the
+  `OVERTURE_PROXY` environment variable. The provider falls back to OSM labels
+  when Overture does not report categories.
 
 - `overture` queries the [Overture Maps Places API](https://docs.overturemaps.org/)
   for building attributes. The endpoint is freely accessible for non-commercial
@@ -185,8 +187,10 @@ enough for quick runs.
 
   If the public endpoint ever requires authentication, supply a token via
   `--overture-auth-token` or the `OVERTURE_AUTH_TOKEN` environment variable and
-  pass `--overture-timeout` to adjust network tolerance. The provider falls back
-  to OSM labels when Overture does not report categories.
+  pass `--overture-timeout` to adjust network tolerance. If your network
+  requires an HTTP proxy, configure it with `--overture-proxy` or the
+  `OVERTURE_PROXY` environment variable. The provider falls back to OSM labels
+  when Overture does not report categories.
 
 - `local_geojson` ingests a FeatureCollection from disk (for example, Microsoft
   building footprints, government POI catalogs, or Mapillary exports). Configure

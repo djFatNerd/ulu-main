@@ -125,6 +125,7 @@ Maps Places API. Optional environment overrides:
 - `OVERTURE_INCLUDE_FIELDS`, `OVERTURE_CATEGORY_FIELDS`, `OVERTURE_NAME_FIELDS`
   – space-delimited field overrides.
 - `OVERTURE_TIMEOUT` – HTTP timeout in seconds.
+- `OVERTURE_PROXY` – HTTP(S) proxy URL if your environment requires tunnelling provider traffic.
 
 ### Combination 3 – Google only
 
@@ -238,6 +239,7 @@ Maps Places API. Optional environment overrides:
 - `OVERTURE_INCLUDE_FIELDS`, `OVERTURE_CATEGORY_FIELDS`, `OVERTURE_NAME_FIELDS`
   – space-delimited field overrides.
 - `OVERTURE_TIMEOUT` – HTTP timeout in seconds.
+- `OVERTURE_PROXY` – HTTP(S) proxy URL if your environment requires tunnelling provider traffic.
 
 ### Combination 3 – Google only
 
