@@ -183,3 +183,13 @@ Common overrides include `DISABLE_OSM_LABELS=true`,
 paths, applies shared throttling parameters, and forwards additional CLI flags
 to the Python entry point so teams can compose cost-effective, high-confidence
 datasets without editing code.
+
+### Free-tier mode
+
+When you need a fully cost-free run, pass `--free-tier` (or export
+`FREE_TIER=true` when using the helper script). This disables paid providers,
+keeps the enriched OSM schema, and automatically loads the sample open datasets
+bundled under `data/open/`. Override them via `--free-tier-geojson` or
+`--free-tier-csv` to point at Microsoft building footprints, Mapillary POIs, or
+other municipal open data. The script gracefully falls back to OSM-only labels
+if no offline datasets are available.
