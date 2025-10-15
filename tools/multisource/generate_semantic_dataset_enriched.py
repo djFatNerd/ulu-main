@@ -708,12 +708,19 @@ def configure_free_tier(args: argparse.Namespace) -> None:
     args.provider = "osm"
 
 
+def _append_once(items: List[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
 def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
     use_osm_labels = not args.disable_osm_labels
 
-    provider_names: List[str]
-    if args.providers:
-        provider_names = list(args.providers)
+    provider_names: List[str] = []
+    explicit_providers = list(args.providers) if args.providers else []
+
+    if explicit_providers:
+        provider_names.extend(explicit_providers)
     else:
         if args.provider == "osm":
             provider = NullProvider()
@@ -725,17 +732,31 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
             if not args.disable_osm_labels:
                 use_osm_labels = False
         elif args.provider == "osm_google":
-            provider_names = ["google"]
+            if args.google_api_key:
+                provider_names = ["google"]
+            else:
+                LOGGER.info(
+                    "Google API key not provided; continuing with OSM-only enrichment."
+                )
+                provider_names = []
         else:
             raise ValueError(f"Unknown provider {args.provider}")
+
+    if args.local_geojson:
+        _append_once(provider_names, "local_geojson")
+    if args.local_csv:
+        _append_once(provider_names, "local_csv")
 
     provider_instances: List[ProviderBase] = []
     for name in provider_names:
         if name == "google":
             if not args.google_api_key:
-                raise ValueError(
-                    "Google API key missing. Provide --google-api-key or set GOOGLE_MAPS_API_KEY."
-                )
+                if explicit_providers or args.provider == "google":
+                    raise ValueError(
+                        "Google provider requested but no API key was supplied. Provide --google-api-key or set GOOGLE_MAPS_API_KEY."
+                    )
+                LOGGER.info("Skipping Google provider because no API key is configured.")
+                continue
             provider_instances.append(
                 GooglePlacesProvider(
                     api_key=args.google_api_key,

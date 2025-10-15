@@ -20,6 +20,30 @@ LOG_LEVEL="${LOG_LEVEL:-INFO}"
 DEFAULT_PROVIDER_MODE="${DEFAULT_PROVIDER_MODE:-osm_google}"
 FREE_TIER_MODE="${FREE_TIER:-false}"
 
+GOOGLE_API_KEY="${GOOGLE_MAPS_API_KEY:-${GOOGLE_API_KEY:-}}"
+GOOGLE_ENABLED=false
+WANTS_GOOGLE=false
+if [[ "$FREE_TIER_MODE" != "true" ]]; then
+  case "$DEFAULT_PROVIDER_MODE" in
+    google|osm_google)
+      WANTS_GOOGLE=true
+      ;;
+  esac
+  if [[ "${ENABLE_GOOGLE:-false}" == "true" ]]; then
+    WANTS_GOOGLE=true
+  fi
+fi
+if [[ "$WANTS_GOOGLE" == "true" ]]; then
+  if [[ -n "$GOOGLE_API_KEY" ]]; then
+    GOOGLE_ENABLED=true
+    if [[ -z "${GOOGLE_MAPS_API_KEY:-}" ]]; then
+      export GOOGLE_MAPS_API_KEY="$GOOGLE_API_KEY"
+    fi
+  elif [[ "${ENABLE_GOOGLE:-false}" == "true" ]]; then
+    echo "ENABLE_GOOGLE requested but no GOOGLE_MAPS_API_KEY/GOOGLE_API_KEY provided" >&2
+  fi
+fi
+
 CMD=(
   python tools/multisource/generate_semantic_dataset_enriched.py
   "$LAT" "$LON" "$RADIUS"
@@ -47,10 +71,6 @@ fi
 
 PROVIDERS=()
 PROVIDER_ARGS=()
-
-if [[ "${ENABLE_GOOGLE:-false}" == "true" && "$FREE_TIER_MODE" != "true" ]]; then
-  PROVIDERS+=(google)
-fi
 
 if [[ -n "${LOCAL_GEOJSON_PATH:-}" ]]; then
   if [[ ! -f "$LOCAL_GEOJSON_PATH" ]]; then
@@ -113,6 +133,19 @@ if [[ -n "${LOCAL_CSV_PATH:-}" ]]; then
   fi
   if [[ -n "${LOCAL_CSV_OPENING_HOURS_FIELD:-}" ]]; then
     PROVIDER_ARGS+=(--local-csv-opening-hours-field "$LOCAL_CSV_OPENING_HOURS_FIELD")
+  fi
+fi
+
+if [[ "$GOOGLE_ENABLED" == "true" ]]; then
+  has_google=false
+  for provider in "${PROVIDERS[@]}"; do
+    if [[ "$provider" == "google" ]]; then
+      has_google=true
+      break
+    fi
+  done
+  if [[ "$has_google" == "false" ]]; then
+    PROVIDERS+=(google)
   fi
 fi
 
