@@ -62,6 +62,17 @@ exclusively on the components required for offline semantic dataset creation.
    combined outputs are described in
    `docs/osm/generate_semantic_dataset_large_area.md`.
 
+### One-command reference
+
+Use the following one-liners when you just need to trigger a specific workflow:
+
+| Workflow | Command |
+| --- | --- |
+| OSM single-area | `python -m tools.osm.generate_semantic_dataset 40.7580 -73.9855 1000 --resolution 1.0 --output ./times_square` |
+| OSM large-area tiling | `python -m tools.osm.generate_semantic_dataset_large_area 40.7580 -73.9855 6000 --max-radius 1500 --resolution 1.0 --output ./times_square_large` |
+| Multisource enrichment | `python tools/multisource/generate_semantic_dataset_enriched.py 40.7580 -73.9855 1000 --provider osm_google --output ./times_square_enriched` |
+| Free-tier preset | `FREE_TIER=true ./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_free` |
+
 ## Multisource enrichment workflow
 
 When you need provider-sourced attributes (official names, Google category
