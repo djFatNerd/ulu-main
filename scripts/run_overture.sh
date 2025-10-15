@@ -23,11 +23,7 @@ MATCH_DISTANCE="${MATCH_DISTANCE:-35.0}"
 PROVIDER_RADIUS="${PROVIDER_RADIUS:-50.0}"
 REQUEST_SLEEP="${REQUEST_SLEEP:-0.2}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
-
-if [[ -z "${OVERTURE_AUTH_TOKEN:-}" ]]; then
-  echo "OVERTURE_AUTH_TOKEN must be set for Overture provider workflows." >&2
-  exit 2
-fi
+CACHE_DIR="${OVERTURE_CACHE_DIR:-}"
 
 CMD=(
   python tools/multisource/generate_semantic_dataset_enriched.py
@@ -39,7 +35,6 @@ CMD=(
   --request-sleep "$REQUEST_SLEEP"
   --log-level "$LOG_LEVEL"
   --provider overture
-  --overture-auth-token "$OVERTURE_AUTH_TOKEN"
 )
 
 if [[ -n "${OVERPASS_URL:-}" ]]; then
@@ -82,8 +77,8 @@ if [[ -n "${OVERTURE_TIMEOUT:-}" ]]; then
   CMD+=(--overture-timeout "$OVERTURE_TIMEOUT")
 fi
 
-if [[ -n "${OVERTURE_PROXY:-}" ]]; then
-  CMD+=(--overture-proxy "$OVERTURE_PROXY")
+if [[ -n "$CACHE_DIR" ]]; then
+  CMD+=(--overture-cache-dir "$CACHE_DIR")
 fi
 
 exec "${CMD[@]}"

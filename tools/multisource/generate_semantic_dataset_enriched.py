@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import time
+from hashlib import md5
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -289,7 +290,7 @@ class GooglePlacesProvider(ProviderBase):
 
 
 class OvertureBuildingsProvider(ProviderBase):
-    """Fetch building metadata from the Overture Maps Places API."""
+    """Fetch building metadata from cached Overture Maps Places downloads."""
 
     name = "overture_buildings"
 
@@ -304,9 +305,8 @@ class OvertureBuildingsProvider(ProviderBase):
         include_fields: Sequence[str],
         category_fields: Sequence[str],
         name_fields: Sequence[str],
-        auth_token: Optional[str],
         timeout: float,
-        proxy_url: Optional[str],
+        cache_dir: Path,
     ) -> None:
         if not base_url:
             raise ValueError("Overture base URL cannot be empty")
@@ -319,36 +319,17 @@ class OvertureBuildingsProvider(ProviderBase):
         self._include_fields = [field for field in include_fields if field]
         self._category_fields = list(category_fields)
         self._name_fields = list(name_fields)
-        self._auth_token = auth_token
         self._timeout = timeout
         self._requests = get_requests()
         self._session = self._requests.Session()
-        self._session.trust_env = True
+        self._session.trust_env = False
         self._session.verify = self._requests.certs.where()
-
-        self._proxies: Dict[str, str] = {}
-        if proxy_url:
-            self._proxies = {"http": proxy_url, "https": proxy_url}
-        else:
-            env_proxies = self._requests.utils.get_environ_proxies(self._endpoint)
-            # urllib3 expects lowercase scheme keys; filter empty entries.
-            self._proxies = {
-                scheme: value
-                for scheme, value in env_proxies.items()
-                if value
-            }
-        if self._proxies:
-            self._session.proxies.update(self._proxies)
+        self._cache_dir = Path(cache_dir)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
             time.sleep(self._sleep_between_requests)
-
-    def _headers(self) -> Dict[str, str]:
-        headers: Dict[str, str] = {}
-        if self._auth_token:
-            headers["Authorization"] = f"Bearer {self._auth_token}"
-        return headers
 
     def _bbox_from_radius(self, lat: float, lon: float) -> Tuple[float, float, float, float]:
         if self._search_radius_m <= 0:
@@ -387,34 +368,139 @@ class OvertureBuildingsProvider(ProviderBase):
                 return candidate
         return None
 
+    def _cache_path(self, bbox_key: str) -> Path:
+        include_hash = "defaults"
+        if self._include_fields:
+            include_hash = md5(",".join(sorted(self._include_fields)).encode("utf-8")).hexdigest()[:8]
+        limit_part = f"limit{self._limit}"
+        raw_key = f"{self._theme}_{limit_part}_{include_hash}_{bbox_key}"
+        safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", raw_key)
+        return self._cache_dir / f"{safe_key}.json"
+
+    def _read_cached_payload(self, cache_path: Path) -> Optional[Dict[str, Any]]:
+        if not cache_path.exists():
+            return None
+        try:
+            with cache_path.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Failed to read cached Overture data at %s: %s", cache_path, exc)
+            try:
+                cache_path.unlink()
+            except OSError:
+                pass
+            return None
+        else:
+            LOGGER.debug("Loaded cached Overture data from %s", cache_path)
+            return payload
+
+    def _download_payload(self, params: Dict[str, Any], cache_path: Path) -> None:
+        tmp_path = cache_path.with_suffix(".tmp")
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        self._throttle()
+        start = time.time()
+        downloaded = 0
+        last_emit = 0.0
+        chunk_size = 8192
+        label = cache_path.name
+        progress_displayed = False
+        try:
+            with self._session.get(
+                self._endpoint,
+                params=params,
+                timeout=self._timeout,
+                stream=True,
+            ) as response:
+                response.raise_for_status()
+                total = int(response.headers.get("Content-Length") or 0)
+                with tmp_path.open("wb") as handle:
+                    for chunk in response.iter_content(chunk_size=chunk_size):
+                        if not chunk:
+                            continue
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.time()
+                        if total:
+                            percent = downloaded / total * 100.0
+                            if downloaded == total or now - last_emit >= 0.2:
+                                rate = downloaded / max(now - start, 1e-6)
+                                sys.stderr.write(
+                                    f"\rDownloading {label}: {percent:5.1f}% "
+                                    f"({downloaded/1024:.1f} KiB/{total/1024:.1f} KiB, "
+                                    f"{rate/1024:.1f} KiB/s)"
+                                )
+                                sys.stderr.flush()
+                                last_emit = now
+                                progress_displayed = True
+                        else:
+                            if now - last_emit >= 0.2:
+                                sys.stderr.write(
+                                    f"\rDownloading {label}: {downloaded/1024:.1f} KiB"
+                                )
+                                sys.stderr.flush()
+                                last_emit = now
+                                progress_displayed = True
+        except Exception:
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        else:
+            tmp_path.replace(cache_path)
+        finally:
+            if progress_displayed:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+
+    def _load_payload(
+        self,
+        lat: float,
+        lon: float,
+        params: Dict[str, Any],
+        cache_path: Path,
+    ) -> Optional[Dict[str, Any]]:
+        payload = self._read_cached_payload(cache_path)
+        if payload is not None:
+            return payload
+        try:
+            LOGGER.info("Downloading Overture data for bbox %s", params.get("bbox"))
+            self._download_payload(params, cache_path)
+        except self._requests.exceptions.RequestException as exc:
+            LOGGER.warning("Overture download failed near %.6f, %.6f: %s", lat, lon, exc)
+            return None
+        except Exception as exc:
+            LOGGER.warning("Unexpected error downloading Overture data near %.6f, %.6f: %s", lat, lon, exc)
+            return None
+        payload = self._read_cached_payload(cache_path)
+        if payload is None:
+            LOGGER.warning(
+                "Cached Overture data at %s could not be parsed after download near %.6f, %.6f",
+                cache_path,
+                lat,
+                lon,
+            )
+        return payload
+
     def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
         params: Dict[str, Any] = {
             "theme": self._theme,
             "limit": self._limit,
         }
         west, south, east, north = self._bbox_from_radius(lat, lon)
+        bbox_key = f"{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}"
         params["bbox"] = f"{west},{south},{east},{north}"
         if self._include_fields:
             params["include"] = ",".join(self._include_fields)
 
-        try:
-            self._throttle()
-            response = self._session.get(
-                self._endpoint,
-                params=params,
-                headers=self._headers(),
-                timeout=self._timeout,
-                proxies=self._proxies or None,
-            )
-            response.raise_for_status()
-        except self._requests.exceptions.RequestException as exc:
-            LOGGER.warning("Overture API request failed near %.6f, %.6f: %s", lat, lon, exc)
-            return None
-
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            LOGGER.warning("Invalid JSON from Overture API near %.6f, %.6f: %s", lat, lon, exc)
+        cache_path = self._cache_path(bbox_key)
+        payload = self._load_payload(lat, lon, params, cache_path)
+        if payload is None:
             return None
 
         features = payload.get("features") if isinstance(payload, dict) else None
@@ -472,7 +558,7 @@ class OvertureBuildingsProvider(ProviderBase):
         if best_distance is not None and self._match_distance_m > 0:
             confidence = max(0.0, 1.0 - (best_distance / self._match_distance_m))
 
-        provenance = {}
+        provenance: Dict[str, str] = {}
         if name_value:
             provenance["name"] = self.name
         if categories:
@@ -1011,9 +1097,8 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     include_fields=args.overture_include_fields,
                     category_fields=args.overture_category_fields,
                     name_fields=args.overture_name_fields,
-                    auth_token=args.overture_auth_token,
                     timeout=args.overture_timeout,
-                    proxy_url=args.overture_proxy,
+                    cache_dir=args.overture_cache_dir,
                 )
             )
         elif name == "local_geojson":
@@ -1453,23 +1538,16 @@ def parse_args() -> argparse.Namespace:
         help="Property paths used to extract names from Overture responses",
     )
     parser.add_argument(
-        "--overture-auth-token",
-        default=None,
-        help="Optional bearer token for Overture API access if required",
-    )
-    parser.add_argument(
         "--overture-timeout",
         type=float,
         default=20.0,
         help="HTTP timeout in seconds for Overture API requests",
     )
     parser.add_argument(
-        "--overture-proxy",
+        "--overture-cache-dir",
+        type=Path,
         default=None,
-        help=(
-            "Optional HTTP(S) proxy URL used for Overture requests. "
-            "Defaults to the OVERTURE_PROXY environment variable when unset."
-        ),
+        help="Directory used to cache downloaded Overture datasets for offline reuse",
     )
     parser.add_argument(
         "--provider-radius",
@@ -1604,14 +1682,15 @@ def main() -> None:
 
     if not args.google_api_key:
         args.google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
-    if not args.overture_auth_token:
-        args.overture_auth_token = os.getenv("OVERTURE_AUTH_TOKEN")
-    if not args.overture_proxy:
-        args.overture_proxy = os.getenv("OVERTURE_PROXY")
-    if args.overture_proxy:
-        args.overture_proxy = args.overture_proxy.strip()
-        if not args.overture_proxy:
-            args.overture_proxy = None
+    if args.overture_cache_dir is None:
+        env_cache_dir = os.getenv("OVERTURE_CACHE_DIR")
+        if env_cache_dir:
+            args.overture_cache_dir = Path(env_cache_dir).expanduser()
+        else:
+            args.overture_cache_dir = ROOT_DIR / "data" / "overture_cache"
+    else:
+        args.overture_cache_dir = Path(args.overture_cache_dir).expanduser()
+    args.overture_cache_dir = args.overture_cache_dir.resolve()
 
     configure_free_tier(args)
 
