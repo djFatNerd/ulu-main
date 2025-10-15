@@ -307,6 +307,8 @@ class OvertureBuildingsProvider(ProviderBase):
         name_fields: Sequence[str],
         timeout: float,
         cache_dir: Path,
+        auth_token: Optional[str] = None,
+        proxy: Optional[str] = None,
     ) -> None:
         if not base_url:
             raise ValueError("Overture base URL cannot be empty")
@@ -324,6 +326,10 @@ class OvertureBuildingsProvider(ProviderBase):
         self._session = self._requests.Session()
         self._session.trust_env = False
         self._session.verify = self._requests.certs.where()
+        if auth_token:
+            self._session.headers.update({"Authorization": f"Bearer {auth_token}"})
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1086,6 +1092,11 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                 )
             )
         elif name == "overture":
+            if not args.overture_auth_token:
+                raise ValueError(
+                    "Overture provider requested but no authentication token supplied. "
+                    "Provide --overture-auth-token or set OVERTURE_AUTH_TOKEN."
+                )
             provider_instances.append(
                 OvertureBuildingsProvider(
                     base_url=args.overture_endpoint,
@@ -1099,6 +1110,8 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     name_fields=args.overture_name_fields,
                     timeout=args.overture_timeout,
                     cache_dir=args.overture_cache_dir,
+                    auth_token=args.overture_auth_token,
+                    proxy=args.overture_proxy,
                 )
             )
         elif name == "local_geojson":
@@ -1542,6 +1555,16 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=20.0,
         help="HTTP timeout in seconds for Overture API requests",
+    )
+    parser.add_argument(
+        "--overture-auth-token",
+        default=os.environ.get("OVERTURE_AUTH_TOKEN"),
+        help="Authentication token for the Overture Places API (default: OVERTURE_AUTH_TOKEN env variable)",
+    )
+    parser.add_argument(
+        "--overture-proxy",
+        default=os.environ.get("OVERTURE_PROXY"),
+        help="Proxy URL for Overture HTTP requests (default: OVERTURE_PROXY env variable)",
     )
     parser.add_argument(
         "--overture-cache-dir",
