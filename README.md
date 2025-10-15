@@ -105,8 +105,19 @@ If you prefer a one-liner, use the bundled helper script (remember to export a
 ./scripts/generate_times_square_enriched.sh
 ```
 
-For more granular control, `./scripts/multi-resource.sh` exposes per-provider
-toggles through environment variables:
+For more granular control, use the turnkey helper script
+`./scripts/multi-resource.sh`. It wraps the enriched CLI and requires three
+positional arguments: latitude, longitude, and radius (in meters). An optional
+fourth argument overrides the output directory (defaults to
+`./semantic_dataset_multi`). For example:
+
+```bash
+# LAT       LON        RADIUS(m)  OUTPUT_DIR
+./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_multi
+```
+
+Provider-specific inputs are toggled via environment variables. Combine them in
+front of the command when needed:
 
 ```bash
 ENABLE_GOOGLE=true \
@@ -115,8 +126,10 @@ LOCAL_CSV_PATH=./data/licensed_businesses.csv \
 ./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_multi
 ```
 
-The helper validates local inputs, applies shared throttling parameters, and
-automatically constructs the appropriate `--providers` invocation.
+If you run the script without the required positional arguments it will print a
+usage message and exit immediately. The helper also validates local file paths,
+applies shared throttling parameters, and automatically constructs the
+appropriate `--providers` invocation for the Python entry point.
 
 ## License
 
