@@ -93,10 +93,24 @@ def _normalize_tokens(value: Any) -> List[str]:
     return tokens
 
 
+def _get_nested_value(source: Dict[str, Any], field: Optional[str]) -> Any:
+    """Retrieve nested dictionary values using dot-delimited field paths."""
+
+    if not field:
+        return None
+    value: Any = source
+    for part in field.split("."):
+        if isinstance(value, dict):
+            value = value.get(part)
+        else:
+            return None
+    return value
+
+
 def _extract_categories(source: Dict[str, Any], fields: Sequence[str]) -> List[str]:
     categories: List[str] = []
     for field in fields:
-        value = source.get(field)
+        value = _get_nested_value(source, field)
         for token in _normalize_tokens(value):
             if token not in categories:
                 categories.append(token)
@@ -271,6 +285,201 @@ class GooglePlacesProvider(ProviderBase):
             confidence=confidence,
             provenance=provenance,
         )
+
+
+class OvertureBuildingsProvider(ProviderBase):
+    """Fetch building metadata from the Overture Maps Places API."""
+
+    name = "overture_buildings"
+
+    def __init__(
+        self,
+        base_url: str,
+        theme: str,
+        search_radius_m: float,
+        match_distance_m: float,
+        sleep_between_requests: float,
+        limit: int,
+        include_fields: Sequence[str],
+        category_fields: Sequence[str],
+        name_fields: Sequence[str],
+        auth_token: Optional[str],
+        timeout: float,
+    ) -> None:
+        if not base_url:
+            raise ValueError("Overture base URL cannot be empty")
+        self._endpoint = base_url.rstrip("/")
+        self._theme = theme
+        self._search_radius_m = search_radius_m
+        self._match_distance_m = match_distance_m
+        self._sleep_between_requests = sleep_between_requests
+        self._limit = max(1, limit)
+        self._include_fields = [field for field in include_fields if field]
+        self._category_fields = list(category_fields)
+        self._name_fields = list(name_fields)
+        self._auth_token = auth_token
+        self._timeout = timeout
+        self._requests = get_requests()
+        self._session = self._requests.Session()
+
+    def _throttle(self) -> None:
+        if self._sleep_between_requests > 0:
+            time.sleep(self._sleep_between_requests)
+
+    def _headers(self) -> Dict[str, str]:
+        headers: Dict[str, str] = {}
+        if self._auth_token:
+            headers["Authorization"] = f"Bearer {self._auth_token}"
+        return headers
+
+    def _bbox_from_radius(self, lat: float, lon: float) -> Tuple[float, float, float, float]:
+        if self._search_radius_m <= 0:
+            return (lon, lat, lon, lat)
+        lat_buffer = self._search_radius_m / 111320.0
+        lon_buffer = self._search_radius_m / max(1e-6, 111320.0 * math.cos(math.radians(lat)))
+        south = lat - lat_buffer
+        north = lat + lat_buffer
+        west = lon - lon_buffer
+        east = lon + lon_buffer
+        return west, south, east, north
+
+    def _extract_name(self, properties: Dict[str, Any]) -> Optional[str]:
+        for field in self._name_fields:
+            value = _get_nested_value(properties, field)
+            if value is None:
+                continue
+            candidate: Optional[str] = None
+            if isinstance(value, str):
+                candidate = value.strip() or None
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        candidate = item.strip()
+                        break
+                    if isinstance(item, dict):
+                        text = item.get("text") or item.get("value")
+                        if isinstance(text, str) and text.strip():
+                            candidate = text.strip()
+                            break
+            elif isinstance(value, dict):
+                text = value.get("text") or value.get("value") or value.get("name")
+                if isinstance(text, str) and text.strip():
+                    candidate = text.strip()
+            if candidate:
+                return candidate
+        return None
+
+    def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
+        params: Dict[str, Any] = {
+            "theme": self._theme,
+            "limit": self._limit,
+        }
+        west, south, east, north = self._bbox_from_radius(lat, lon)
+        params["bbox"] = f"{west},{south},{east},{north}"
+        if self._include_fields:
+            params["include"] = ",".join(self._include_fields)
+
+        try:
+            self._throttle()
+            response = self._session.get(
+                self._endpoint,
+                params=params,
+                headers=self._headers(),
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+        except self._requests.exceptions.RequestException as exc:
+            LOGGER.warning("Overture API request failed near %.6f, %.6f: %s", lat, lon, exc)
+            return None
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            LOGGER.warning("Invalid JSON from Overture API near %.6f, %.6f: %s", lat, lon, exc)
+            return None
+
+        features = payload.get("features") if isinstance(payload, dict) else None
+        if not features:
+            return None
+
+        best_candidate: Optional[Dict[str, Any]] = None
+        best_distance: Optional[float] = None
+
+        for candidate in features:
+            geometry = candidate.get("geometry") if isinstance(candidate, dict) else None
+            centroid_lat: Optional[float] = None
+            centroid_lon: Optional[float] = None
+            if geometry:
+                try:
+                    geom = shape(geometry)
+                    if not geom.is_empty:
+                        centroid = geom.representative_point()
+                        centroid_lat = centroid.y
+                        centroid_lon = centroid.x
+                except Exception:
+                    centroid_lat = None
+                    centroid_lon = None
+            properties = candidate.get("properties") if isinstance(candidate, dict) else {}
+            if (centroid_lat is None or centroid_lon is None) and isinstance(properties, dict):
+                anchor = _get_nested_value(properties, "anchor")
+                if isinstance(anchor, dict):
+                    centroid_lat = anchor.get("lat") or anchor.get("latitude")
+                    centroid_lon = anchor.get("lon") or anchor.get("lng") or anchor.get("longitude")
+
+            distance = haversine_distance_m(lat, lon, centroid_lat, centroid_lon)
+            if distance is None:
+                continue
+            if self._match_distance_m > 0 and distance > self._match_distance_m:
+                continue
+            if best_distance is None or distance < best_distance:
+                best_candidate = candidate
+                best_distance = distance
+
+        if not best_candidate:
+            return None
+
+        properties = best_candidate.get("properties") if isinstance(best_candidate, dict) else {}
+        properties = properties or {}
+        name_value = self._extract_name(properties)
+        categories = _extract_categories(properties, self._category_fields)
+        if not categories:
+            categories = ["building"]
+
+        place_id = best_candidate.get("id") if isinstance(best_candidate, dict) else None
+        if place_id is not None:
+            place_id = str(place_id)
+
+        confidence = 1.0
+        if best_distance is not None and self._match_distance_m > 0:
+            confidence = max(0.0, 1.0 - (best_distance / self._match_distance_m))
+
+        provenance = {}
+        if name_value:
+            provenance["name"] = self.name
+        if categories:
+            provenance["categories"] = self.name
+        if place_id:
+            provenance["place_id"] = self.name
+
+        return ProviderResult(
+            provider=self.name,
+            place_id=place_id,
+            name=name_value,
+            categories=categories,
+            rating=None,
+            rating_count=None,
+            opening_hours_text=None,
+            raw=best_candidate,
+            distance_m=best_distance,
+            confidence=confidence,
+            provenance=provenance,
+        )
+
+    def close(self) -> None:
+        try:
+            self._session.close()
+        except Exception:  # pragma: no cover - defensive cleanup
+            pass
 
 
 class LocalGeoJSONProvider(ProviderBase):
@@ -739,6 +948,12 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     "Google API key not provided; continuing with OSM-only enrichment."
                 )
                 provider_names = []
+        elif args.provider == "overture":
+            provider_names = ["overture"]
+            if not args.disable_osm_labels:
+                use_osm_labels = False
+        elif args.provider == "osm_overture":
+            provider_names = ["overture"]
         else:
             raise ValueError(f"Unknown provider {args.provider}")
 
@@ -763,6 +978,22 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     search_radius_m=args.provider_radius,
                     match_distance_m=args.match_distance,
                     sleep_between_requests=args.request_sleep,
+                )
+            )
+        elif name == "overture":
+            provider_instances.append(
+                OvertureBuildingsProvider(
+                    base_url=args.overture_endpoint,
+                    theme=args.overture_theme,
+                    search_radius_m=args.provider_radius,
+                    match_distance_m=args.match_distance,
+                    sleep_between_requests=args.request_sleep,
+                    limit=args.overture_limit,
+                    include_fields=args.overture_include_fields,
+                    category_fields=args.overture_category_fields,
+                    name_fields=args.overture_name_fields,
+                    auth_token=args.overture_auth_token,
+                    timeout=args.overture_timeout,
                 )
             )
         elif name == "local_geojson":
@@ -1138,18 +1369,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--provider",
-        choices=["osm", "google", "osm_google"],
+        choices=["osm", "google", "osm_google", "overture", "osm_overture"],
         default="osm_google",
         help=(
             "Backward-compatible provider shortcut. 'osm' keeps OSM-only attributes, "
-            "'google' relies solely on Google metadata, and 'osm_google' merges both. "
-            "Use --providers for multi-source workflows."
+            "'google' relies solely on Google metadata, 'overture' uses the Overture Maps "
+            "buildings dataset, and 'osm_google'/'osm_overture' merge OSM labels with the "
+            "respective provider. Use --providers for multi-source workflows."
         ),
     )
     parser.add_argument(
         "--providers",
         nargs="+",
-        choices=["google", "local_geojson", "local_csv"],
+        choices=["google", "overture", "local_geojson", "local_csv"],
         help="Optional list of enrichment providers to combine. Overrides --provider when supplied.",
     )
     parser.add_argument(
@@ -1164,6 +1396,51 @@ def parse_args() -> argparse.Namespace:
         "--google-api-key",
         default=None,
         help="Google Maps Platform API key for Google provider modes",
+    )
+    parser.add_argument(
+        "--overture-endpoint",
+        default="https://api.overturemaps.org/places/v1/places",
+        help="Overture Maps Places API endpoint used for building lookups",
+    )
+    parser.add_argument(
+        "--overture-theme",
+        default="buildings",
+        help="Theme parameter passed to the Overture Places API",
+    )
+    parser.add_argument(
+        "--overture-limit",
+        type=int,
+        default=25,
+        help="Maximum number of features retrieved per Overture API request",
+    )
+    parser.add_argument(
+        "--overture-include-fields",
+        nargs="*",
+        default=["names", "categories", "addresses"],
+        help="Optional list of fields requested via the Overture include= parameter",
+    )
+    parser.add_argument(
+        "--overture-category-fields",
+        nargs="*",
+        default=["categories", "category", "function", "building.use", "building.function"],
+        help="Property paths used to extract categories from Overture responses",
+    )
+    parser.add_argument(
+        "--overture-name-fields",
+        nargs="*",
+        default=["name", "names.primary", "display.name", "displayName.text"],
+        help="Property paths used to extract names from Overture responses",
+    )
+    parser.add_argument(
+        "--overture-auth-token",
+        default=None,
+        help="Optional bearer token for Overture API access if required",
+    )
+    parser.add_argument(
+        "--overture-timeout",
+        type=float,
+        default=20.0,
+        help="HTTP timeout in seconds for Overture API requests",
     )
     parser.add_argument(
         "--provider-radius",
@@ -1298,6 +1575,8 @@ def main() -> None:
 
     if not args.google_api_key:
         args.google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+    if not args.overture_auth_token:
+        args.overture_auth_token = os.getenv("OVERTURE_AUTH_TOKEN")
 
     configure_free_tier(args)
 

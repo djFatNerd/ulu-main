@@ -127,6 +127,30 @@ providers, update this guide with rate-limit guidance and attribution rules.
 Beyond the bundled Google Places integration, the CLI now ships with
 providers that can operate entirely on offline or open datasets:
 
+- `overture` queries the [Overture Maps Places API](https://docs.overturemaps.org/)
+  for building attributes. The endpoint is freely accessible for non-commercial
+  use and returns a unified schema that merges OpenStreetMap, Microsoft, Meta,
+  Esri, and other contributors. Set `--provider overture` to rely exclusively on
+  Overture metadata, or combine it with OSM via `--provider osm_overture` or the
+  generic `--providers overture ...` flag. You can customize the query radius,
+  requested property bags, and optional bearer token through the
+  `--overture-*` arguments:
+
+  ```bash
+  python tools/multisource/generate_semantic_dataset_enriched.py \
+      48.8566 2.3522 1500 \
+      --provider osm_overture \
+      --overture-include-fields names categories addresses \
+      --overture-category-fields categories function building.use \
+      --overture-name-fields name names.primary \
+      --request-sleep 0.1
+  ```
+
+  If the public endpoint ever requires authentication, supply a token via
+  `--overture-auth-token` or the `OVERTURE_AUTH_TOKEN` environment variable and
+  pass `--overture-timeout` to adjust network tolerance. The provider falls back
+  to OSM labels when Overture does not report categories.
+
 - `local_geojson` ingests a FeatureCollection from disk (for example, Microsoft
   building footprints, government POI catalogs, or Mapillary exports). Configure
   the relevant property fields via `--local-geojson-*` flags so that names,
