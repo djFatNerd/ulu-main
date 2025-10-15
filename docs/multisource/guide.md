@@ -166,6 +166,13 @@ enough for quick runs.
   `OVERTURE_PROXY` environment variable. The provider falls back to OSM labels
   when Overture does not report categories.
 
+  To run fully offline, pre-populate the cache directory (default
+  `data/overture_cache`) with responses gathered during an online session, then
+  re-run the workflow using `--overture-cache-only` or setting
+  `OVERTURE_CACHE_ONLY=1`. In cache-only mode the script never contacts the API;
+  if a bounding box is missing, the corresponding buildings will simply be left
+  without Overture enrichment.
+
 - `overture` queries the [Overture Maps Places API](https://docs.overturemaps.org/)
   for building attributes. The endpoint is freely accessible for non-commercial
   use and returns a unified schema that merges OpenStreetMap, Microsoft, Meta,
