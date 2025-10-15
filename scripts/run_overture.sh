@@ -82,4 +82,8 @@ if [[ -n "${OVERTURE_TIMEOUT:-}" ]]; then
   CMD+=(--overture-timeout "$OVERTURE_TIMEOUT")
 fi
 
+if [[ -n "${OVERTURE_PROXY:-}" ]]; then
+  CMD+=(--overture-proxy "$OVERTURE_PROXY")
+fi
+
 exec "${CMD[@]}"

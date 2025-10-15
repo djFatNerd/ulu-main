@@ -17,6 +17,7 @@ from .generate_semantic_dataset import (  # noqa: F401
     get_shapely_geometry,
     get_shapely_transform,
     latlon_to_local_projector,
+    local_to_latlon_projector,
     meters_per_degree_lat,
     meters_per_degree_lon,
     rasterize_semantics,
