@@ -309,6 +309,7 @@ class OvertureBuildingsProvider(ProviderBase):
         cache_dir: Path,
         auth_token: Optional[str] = None,
         proxy: Optional[str] = None,
+        cache_only: bool = False,
     ) -> None:
         if not base_url:
             raise ValueError("Overture base URL cannot be empty")
@@ -322,14 +323,17 @@ class OvertureBuildingsProvider(ProviderBase):
         self._category_fields = list(category_fields)
         self._name_fields = list(name_fields)
         self._timeout = timeout
+        self._cache_only = cache_only
         self._requests = get_requests()
-        self._session = self._requests.Session()
-        self._session.trust_env = False
-        self._session.verify = self._requests.certs.where()
-        if auth_token:
-            self._session.headers.update({"Authorization": f"Bearer {auth_token}"})
-        if proxy:
-            self._session.proxies = {"http": proxy, "https": proxy}
+        self._session = None
+        if not self._cache_only:
+            self._session = self._requests.Session()
+            self._session.trust_env = False
+            self._session.verify = self._requests.certs.where()
+            if auth_token:
+                self._session.headers.update({"Authorization": f"Bearer {auth_token}"})
+            if proxy:
+                self._session.proxies = {"http": proxy, "https": proxy}
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -414,6 +418,8 @@ class OvertureBuildingsProvider(ProviderBase):
         chunk_size = 8192
         label = cache_path.name
         progress_displayed = False
+        if self._session is None:
+            raise RuntimeError("Overture HTTP session is unavailable in cache-only mode")
         try:
             with self._session.get(
                 self._endpoint,
@@ -474,6 +480,15 @@ class OvertureBuildingsProvider(ProviderBase):
         payload = self._read_cached_payload(cache_path)
         if payload is not None:
             return payload
+        if self._cache_only:
+            LOGGER.warning(
+                "Overture cache miss for bbox %s near %.6f, %.6f (cache-only mode).",
+                params.get("bbox"),
+                lat,
+                lon,
+            )
+            LOGGER.info("Set OVERTURE_CACHE_DIR to a directory containing pre-downloaded responses.")
+            return None
         try:
             LOGGER.info("Downloading Overture data for bbox %s", params.get("bbox"))
             self._download_payload(params, cache_path)
@@ -587,6 +602,8 @@ class OvertureBuildingsProvider(ProviderBase):
         )
 
     def close(self) -> None:
+        if self._session is None:
+            return
         try:
             self._session.close()
         except Exception:  # pragma: no cover - defensive cleanup
@@ -1092,10 +1109,11 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                 )
             )
         elif name == "overture":
-            if not args.overture_auth_token:
+            if not args.overture_auth_token and not args.overture_cache_only:
                 raise ValueError(
                     "Overture provider requested but no authentication token supplied. "
-                    "Provide --overture-auth-token or set OVERTURE_AUTH_TOKEN."
+                    "Provide --overture-auth-token or set OVERTURE_AUTH_TOKEN, or enable --overture-cache-only "
+                    "to rely solely on cached responses."
                 )
             provider_instances.append(
                 OvertureBuildingsProvider(
@@ -1112,6 +1130,7 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     cache_dir=args.overture_cache_dir,
                     auth_token=args.overture_auth_token,
                     proxy=args.overture_proxy,
+                    cache_only=args.overture_cache_only,
                 )
             )
         elif name == "local_geojson":
@@ -1573,6 +1592,14 @@ def parse_args() -> argparse.Namespace:
         help="Directory used to cache downloaded Overture datasets for offline reuse",
     )
     parser.add_argument(
+        "--overture-cache-only",
+        action="store_true",
+        help=(
+            "Skip Overture network requests and rely exclusively on cached responses. "
+            "Use with OVERTURE_CACHE_DIR pointing at pre-downloaded payloads."
+        ),
+    )
+    parser.add_argument(
         "--provider-radius",
         type=float,
         default=50.0,
@@ -1705,6 +1732,10 @@ def main() -> None:
 
     if not args.google_api_key:
         args.google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+    cache_only_env = os.getenv("OVERTURE_CACHE_ONLY")
+    if cache_only_env and not args.overture_cache_only:
+        if cache_only_env.lower() in {"1", "true", "yes", "on"}:
+            args.overture_cache_only = True
     if args.overture_cache_dir is None:
         env_cache_dir = os.getenv("OVERTURE_CACHE_DIR")
         if env_cache_dir:

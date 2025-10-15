@@ -126,6 +126,10 @@ Maps Places API. Optional environment overrides:
   – space-delimited field overrides.
 - `OVERTURE_TIMEOUT` – HTTP timeout in seconds.
 - `OVERTURE_PROXY` – HTTP(S) proxy URL if your environment requires tunnelling provider traffic.
+- `OVERTURE_CACHE_DIR` – directory used to persist Overture responses for reuse (default `data/overture_cache`).
+- `--overture-cache-only` / `OVERTURE_CACHE_ONLY=1` – disable live API calls and rely solely on files already present in the
+  cache directory. Populate the cache by running the workflow once while online or by copying pre-downloaded payloads into the
+  directory using the naming scheme produced by the online runs.
 
 ### Combination 3 – Google only
 
