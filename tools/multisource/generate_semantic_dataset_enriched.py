@@ -21,6 +21,8 @@ from shapely.strtree import STRtree
 import sys
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_FREE_GEOJSON = ROOT_DIR / "data" / "open" / "community_pois.geojson"
+DEFAULT_FREE_CSV = ROOT_DIR / "data" / "open" / "business_registry.csv"
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -667,6 +669,45 @@ def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> 
     return 6371000.0 * c
 
 
+def configure_free_tier(args: argparse.Namespace) -> None:
+    """Mutate parsed arguments so only open/offline providers are used."""
+
+    if not args.free_tier:
+        return
+
+    if args.providers:
+        args.providers = [name for name in args.providers if name != "google"]
+    if not args.providers:
+        args.providers = []
+
+    # Prefer user-specified overrides. Fall back to bundled open datasets when available.
+    if not args.local_geojson:
+        candidate_geojson = args.free_tier_geojson or DEFAULT_FREE_GEOJSON
+        if candidate_geojson and Path(candidate_geojson).exists():
+            args.local_geojson = Path(candidate_geojson)
+        else:
+            LOGGER.info("Free-tier GeoJSON source unavailable at %s", candidate_geojson)
+    if not args.local_csv:
+        candidate_csv = args.free_tier_csv or DEFAULT_FREE_CSV
+        if candidate_csv and Path(candidate_csv).exists():
+            args.local_csv = Path(candidate_csv)
+        else:
+            LOGGER.info("Free-tier CSV source unavailable at %s", candidate_csv)
+
+    if args.local_geojson and "local_geojson" not in args.providers:
+        args.providers.append("local_geojson")
+    if args.local_csv and "local_csv" not in args.providers:
+        args.providers.append("local_csv")
+
+    if not args.providers:
+        LOGGER.info(
+            "Free-tier mode enabled but no offline providers configured; falling back to OSM-only labels."
+        )
+
+    # Ensure we do not rely on the Google shortcut defaults.
+    args.provider = "osm"
+
+
 def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
     use_osm_labels = not args.disable_osm_labels
 
@@ -1091,6 +1132,14 @@ def parse_args() -> argparse.Namespace:
         help="Optional list of enrichment providers to combine. Overrides --provider when supplied.",
     )
     parser.add_argument(
+        "--free-tier",
+        action="store_true",
+        help=(
+            "Enable an offline-friendly configuration that avoids paid providers. "
+            "Automatically loads bundled open datasets unless overrides are supplied."
+        ),
+    )
+    parser.add_argument(
         "--google-api-key",
         default=None,
         help="Google Maps Platform API key for Google provider modes",
@@ -1156,6 +1205,12 @@ def parse_args() -> argparse.Namespace:
         help="GeoJSON property field that stores opening hours",
     )
     parser.add_argument(
+        "--free-tier-geojson",
+        type=Path,
+        default=None,
+        help="Override path for the GeoJSON dataset used when --free-tier is enabled",
+    )
+    parser.add_argument(
         "--local-csv",
         type=Path,
         default=None,
@@ -1203,6 +1258,12 @@ def parse_args() -> argparse.Namespace:
         help="CSV column that stores opening hours",
     )
     parser.add_argument(
+        "--free-tier-csv",
+        type=Path,
+        default=None,
+        help="Override path for the CSV dataset used when --free-tier is enabled",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
@@ -1216,6 +1277,8 @@ def main() -> None:
 
     if not args.google_api_key:
         args.google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+
+    configure_free_tier(args)
 
     provider, use_osm_labels, provider_mode = select_provider(args)
     try:

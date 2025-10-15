@@ -18,6 +18,7 @@ PROVIDER_RADIUS="${PROVIDER_RADIUS:-50.0}"
 REQUEST_SLEEP="${REQUEST_SLEEP:-0.2}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 DEFAULT_PROVIDER_MODE="${DEFAULT_PROVIDER_MODE:-osm_google}"
+FREE_TIER_MODE="${FREE_TIER:-false}"
 
 CMD=(
   python tools/multisource/generate_semantic_dataset_enriched.py
@@ -47,7 +48,7 @@ fi
 PROVIDERS=()
 PROVIDER_ARGS=()
 
-if [[ "${ENABLE_GOOGLE:-false}" == "true" ]]; then
+if [[ "${ENABLE_GOOGLE:-false}" == "true" && "$FREE_TIER_MODE" != "true" ]]; then
   PROVIDERS+=(google)
 fi
 
@@ -122,6 +123,24 @@ else
 fi
 
 CMD+=("${PROVIDER_ARGS[@]}")
+
+if [[ "$FREE_TIER_MODE" == "true" ]]; then
+  CMD+=(--free-tier)
+  if [[ -n "${FREE_TIER_GEOJSON:-}" ]]; then
+    if [[ ! -f "$FREE_TIER_GEOJSON" ]]; then
+      echo "Free-tier GeoJSON path $FREE_TIER_GEOJSON does not exist" >&2
+      exit 4
+    fi
+    CMD+=(--free-tier-geojson "$FREE_TIER_GEOJSON")
+  fi
+  if [[ -n "${FREE_TIER_CSV:-}" ]]; then
+    if [[ ! -f "$FREE_TIER_CSV" ]]; then
+      echo "Free-tier CSV path $FREE_TIER_CSV does not exist" >&2
+      exit 5
+    fi
+    CMD+=(--free-tier-csv "$FREE_TIER_CSV")
+  fi
+fi
 
 if [[ "${VERBOSE:-false}" == "true" ]]; then
   echo "Running: ${CMD[*]}" >&2

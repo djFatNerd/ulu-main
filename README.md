@@ -126,6 +126,23 @@ LOCAL_CSV_PATH=./data/licensed_businesses.csv \
 ./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_multi
 ```
 
+### Zero-cost, open-data preset
+
+To experiment without any paid APIs, enable the new free-tier preset. It
+activates OSM-only labeling and automatically wires in the sample open datasets
+under `data/open/` (feel free to swap them with your own Microsoft building
+footprints, Mapillary exports, or municipal open data downloads):
+
+```bash
+./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_free \
+    FREE_TIER=true
+```
+
+Behind the scenes this forwards `--free-tier` to the multisource CLI, forcing an
+OSM + offline-provider workflow. You can override the bundled datasets by
+passing `FREE_TIER_GEOJSON=/path/to/file.geojson` or
+`FREE_TIER_CSV=/path/to/file.csv` alongside the command.
+
 If you run the script without the required positional arguments it will print a
 usage message and exit immediately. The helper also validates local file paths,
 applies shared throttling parameters, and automatically constructs the
