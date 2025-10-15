@@ -38,6 +38,7 @@ from tools.osm import (
     element_to_geometry,
     get_requests,
     latlon_to_local_projector,
+    local_to_latlon_projector,
     rasterize_semantics,
 )
 
@@ -1247,6 +1248,7 @@ def run_generation(
 
     bbox = compute_bbox(lat, lon, radius_m)
     projector = latlon_to_local_projector(lat, lon)
+    inverse_projector = local_to_latlon_projector(lat, lon)
 
     requests_module = get_requests()
     osm_script.DEFAULT_OVERPASS_FALLBACKS = list(fallback_overpass)
@@ -1281,7 +1283,7 @@ def run_generation(
     rasterize_semantics(class_geometries, resolution, radius_m, raster_output)
 
     LOGGER.info("Building metadata GeoJSON with enrichment")
-    features = build_building_features(buildings, projector, radius_m)
+    features = build_building_features(buildings, projector, inverse_projector, radius_m)
     enriched_features, provider_summary = enrich_features(features, provider, use_osm_labels)
 
     geojson = {
