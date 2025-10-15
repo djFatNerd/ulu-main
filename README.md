@@ -36,7 +36,7 @@ obtain credentials (when needed), typical costs, and operational tips.
   attributes (names, categories, brand metadata) from the Overture Maps
   Foundation.
 - **How to obtain an access token** –
-  1. Visit the [Overture Maps developer portal](https://developer.overturemaps.org/).
+  1. Visit the [Overture Maps developer portal](https://account.overturemapsapi.com/).
   2. Sign in with a GitHub account and create a new application.
   3. Generate an API token and copy it to a secure location.
   4. Export it as `OVERTURE_AUTH_TOKEN` before running the scripts.
