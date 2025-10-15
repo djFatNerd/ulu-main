@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import math
@@ -11,6 +12,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+import re
+
+from shapely.geometry import Point, box, shape
+from shapely.strtree import STRtree
 
 import sys
 
@@ -50,6 +56,7 @@ class ProviderResult:
     raw: Dict[str, Any]
     distance_m: Optional[float]
     confidence: float
+    provenance: Dict[str, str]
 
 
 class ProviderBase:
@@ -62,6 +69,45 @@ class ProviderBase:
 
     def close(self) -> None:  # pragma: no cover - hook for future resources
         return None
+
+
+def _normalize_tokens(value: Any) -> List[str]:
+    """Normalize category- or tag-like values into a list of unique strings."""
+
+    tokens: List[str] = []
+    if value is None:
+        return tokens
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            tokens.extend(_normalize_tokens(item))
+        return tokens
+    if isinstance(value, (int, float)):
+        value = str(value)
+    if isinstance(value, str):
+        for part in re.split(r"[|;,]", value):
+            cleaned = part.strip()
+            if cleaned and cleaned not in tokens:
+                tokens.append(cleaned)
+    return tokens
+
+
+def _extract_categories(source: Dict[str, Any], fields: Sequence[str]) -> List[str]:
+    categories: List[str] = []
+    for field in fields:
+        value = source.get(field)
+        for token in _normalize_tokens(value):
+            if token not in categories:
+                categories.append(token)
+    return categories
+
+
+def _extract_opening_hours(value: Any) -> Optional[List[str]]:
+    hours = _normalize_tokens(value)
+    return hours if hours else None
+
+
+def _field_provenance(result: ProviderResult, field: str) -> str:
+    return result.provenance.get(field) or (result.provider if result.provider else "")
 
 
 class NullProvider(ProviderBase):
@@ -195,10 +241,25 @@ class GooglePlacesProvider(ProviderBase):
         if best_distance is not None and self._match_distance_m > 0:
             confidence = max(0.0, 1.0 - (best_distance / self._match_distance_m))
 
+        name_value = details.get("name") or best_candidate.get("name")
+        provenance: Dict[str, str] = {}
+        if place_id:
+            provenance["place_id"] = self.name
+        if name_value:
+            provenance["name"] = self.name
+        if categories:
+            provenance["categories"] = self.name
+        if rating is not None:
+            provenance["rating"] = self.name
+        if rating_count is not None:
+            provenance["rating_count"] = self.name
+        if opening_hours:
+            provenance["opening_hours"] = self.name
+
         return ProviderResult(
             provider=self.name,
             place_id=place_id,
-            name=details.get("name") or best_candidate.get("name"),
+            name=name_value,
             categories=categories,
             rating=rating,
             rating_count=rating_count,
@@ -206,8 +267,391 @@ class GooglePlacesProvider(ProviderBase):
             raw={"candidate": best_candidate, "details": details},
             distance_m=best_distance,
             confidence=confidence,
+            provenance=provenance,
         )
 
+
+class LocalGeoJSONProvider(ProviderBase):
+    """Lookup enrichment metadata from an offline GeoJSON dataset."""
+
+    name = "local_geojson"
+
+    def __init__(
+        self,
+        path: Path,
+        match_distance_m: float,
+        name_field: Optional[str],
+        category_fields: Sequence[str],
+        id_field: Optional[str],
+        rating_field: Optional[str],
+        rating_count_field: Optional[str],
+        opening_hours_field: Optional[str],
+    ) -> None:
+        self._path = path
+        self._match_distance_m = match_distance_m
+        self._name_field = name_field
+        self._category_fields = list(category_fields)
+        self._id_field = id_field
+        self._rating_field = rating_field
+        self._rating_count_field = rating_count_field
+        self._opening_hours_field = opening_hours_field
+        self._records: Dict[int, Dict[str, Any]] = {}
+        self._geoms: List[Any] = []
+
+        if not self._path.exists():
+            raise FileNotFoundError(f"Local GeoJSON provider file not found: {self._path}")
+
+        with self._path.open("r", encoding="utf-8") as f:
+            content = json.load(f)
+
+        features = content.get("features") if isinstance(content, dict) else None
+        if features is None:
+            raise ValueError("GeoJSON file must contain a FeatureCollection with a 'features' array")
+
+        for feature in features:
+            geometry = feature.get("geometry")
+            if not geometry:
+                continue
+            try:
+                geom = shape(geometry)
+            except Exception:
+                continue
+            if geom.is_empty:
+                continue
+            props = feature.get("properties", {}) or {}
+            centroid = geom.representative_point()
+            place_id = props.get(self._id_field) if self._id_field else None
+            if place_id is not None:
+                place_id = str(place_id)
+            record = {
+                "centroid_lat": centroid.y,
+                "centroid_lon": centroid.x,
+                "properties": props,
+                "name": props.get(self._name_field) if self._name_field else None,
+                "categories": _extract_categories(props, self._category_fields),
+                "place_id": place_id,
+                "rating": props.get(self._rating_field) if self._rating_field else None,
+                "rating_count": props.get(self._rating_count_field) if self._rating_count_field else None,
+                "opening_hours": props.get(self._opening_hours_field) if self._opening_hours_field else None,
+            }
+            geom_id = id(geom)
+            self._records[geom_id] = record
+            self._geoms.append(geom)
+
+        self._tree = STRtree(self._geoms) if self._geoms else None
+
+    def _query_candidates(self, lat: float, lon: float) -> List[Dict[str, Any]]:
+        if not self._tree:
+            return []
+        if self._match_distance_m <= 0:
+            envelope = box(lon, lat, lon, lat)
+        else:
+            lat_buffer = self._match_distance_m / 111320.0
+            lon_buffer = self._match_distance_m / max(1e-6, 111320.0 * math.cos(math.radians(lat)))
+            envelope = box(lon - lon_buffer, lat - lat_buffer, lon + lon_buffer, lat + lat_buffer)
+        candidates = []
+        for geom in self._tree.query(envelope):
+            record = self._records.get(id(geom))
+            if record:
+                candidates.append(record)
+        return candidates
+
+    def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
+        candidates = self._query_candidates(lat, lon)
+        best_record: Optional[Dict[str, Any]] = None
+        best_distance: Optional[float] = None
+        for record in candidates:
+            distance = haversine_distance_m(lat, lon, record["centroid_lat"], record["centroid_lon"])
+            if distance is None:
+                continue
+            if self._match_distance_m > 0 and distance > self._match_distance_m:
+                continue
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_record = record
+
+        if not best_record:
+            return None
+
+        props = best_record["properties"]
+        name_value = best_record.get("name")
+        categories = best_record.get("categories", [])
+        place_id = best_record.get("place_id")
+
+        rating = best_record.get("rating")
+        try:
+            rating = float(rating) if rating is not None else None
+        except (TypeError, ValueError):
+            rating = None
+
+        rating_count = best_record.get("rating_count")
+        try:
+            rating_count = int(rating_count) if rating_count is not None else None
+        except (TypeError, ValueError):
+            rating_count = None
+
+        opening_hours = _extract_opening_hours(best_record.get("opening_hours"))
+
+        confidence = 0.0
+        if best_distance is not None and self._match_distance_m > 0:
+            confidence = max(0.0, 1.0 - (best_distance / self._match_distance_m))
+
+        provenance: Dict[str, str] = {}
+        if place_id:
+            provenance["place_id"] = self.name
+        if name_value:
+            provenance["name"] = self.name
+        if categories:
+            provenance["categories"] = self.name
+        if rating is not None:
+            provenance["rating"] = self.name
+        if rating_count is not None:
+            provenance["rating_count"] = self.name
+        if opening_hours:
+            provenance["opening_hours"] = self.name
+
+        return ProviderResult(
+            provider=self.name,
+            place_id=place_id,
+            name=name_value,
+            categories=categories,
+            rating=rating,
+            rating_count=rating_count,
+            opening_hours_text=opening_hours,
+            raw={"properties": props, "path": str(self._path)},
+            distance_m=best_distance,
+            confidence=confidence,
+            provenance=provenance,
+        )
+
+
+class LocalCSVProvider(ProviderBase):
+    """Lookup enrichment metadata from an offline CSV table."""
+
+    name = "local_csv"
+
+    def __init__(
+        self,
+        path: Path,
+        match_distance_m: float,
+        lat_field: str,
+        lon_field: str,
+        name_field: Optional[str],
+        category_fields: Sequence[str],
+        rating_field: Optional[str],
+        rating_count_field: Optional[str],
+        opening_hours_field: Optional[str],
+        id_field: Optional[str],
+    ) -> None:
+        self._path = path
+        self._match_distance_m = match_distance_m
+        self._lat_field = lat_field
+        self._lon_field = lon_field
+        self._name_field = name_field
+        self._category_fields = list(category_fields)
+        self._rating_field = rating_field
+        self._rating_count_field = rating_count_field
+        self._opening_hours_field = opening_hours_field
+        self._id_field = id_field
+        self._records: Dict[int, Dict[str, Any]] = {}
+        self._geoms: List[Any] = []
+
+        if not self._path.exists():
+            raise FileNotFoundError(f"Local CSV provider file not found: {self._path}")
+
+        with self._path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    lat = float(row.get(self._lat_field))
+                    lon = float(row.get(self._lon_field))
+                except (TypeError, ValueError):
+                    continue
+                geom = Point(lon, lat)
+                if geom.is_empty:
+                    continue
+                categories = _extract_categories(row, self._category_fields)
+                place_id = row.get(self._id_field) if self._id_field else None
+                if place_id is not None:
+                    place_id = str(place_id)
+                record = {
+                    "centroid_lat": lat,
+                    "centroid_lon": lon,
+                    "properties": row,
+                    "name": row.get(self._name_field) if self._name_field else None,
+                    "categories": categories,
+                    "place_id": place_id,
+                    "rating": row.get(self._rating_field) if self._rating_field else None,
+                    "rating_count": row.get(self._rating_count_field) if self._rating_count_field else None,
+                    "opening_hours": row.get(self._opening_hours_field) if self._opening_hours_field else None,
+                }
+                geom_id = id(geom)
+                self._records[geom_id] = record
+                self._geoms.append(geom)
+
+        self._tree = STRtree(self._geoms) if self._geoms else None
+
+    def _query_candidates(self, lat: float, lon: float) -> List[Dict[str, Any]]:
+        if not self._tree:
+            return []
+        if self._match_distance_m <= 0:
+            envelope = box(lon, lat, lon, lat)
+        else:
+            lat_buffer = self._match_distance_m / 111320.0
+            lon_buffer = self._match_distance_m / max(1e-6, 111320.0 * math.cos(math.radians(lat)))
+            envelope = box(lon - lon_buffer, lat - lat_buffer, lon + lon_buffer, lat + lat_buffer)
+        candidates = []
+        for geom in self._tree.query(envelope):
+            record = self._records.get(id(geom))
+            if record:
+                candidates.append(record)
+        return candidates
+
+    def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
+        candidates = self._query_candidates(lat, lon)
+        best_record: Optional[Dict[str, Any]] = None
+        best_distance: Optional[float] = None
+        for record in candidates:
+            distance = haversine_distance_m(lat, lon, record["centroid_lat"], record["centroid_lon"])
+            if distance is None:
+                continue
+            if self._match_distance_m > 0 and distance > self._match_distance_m:
+                continue
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_record = record
+
+        if not best_record:
+            return None
+
+        name_value = best_record.get("name")
+        categories = best_record.get("categories", [])
+
+        rating = best_record.get("rating")
+        try:
+            rating = float(rating) if rating is not None else None
+        except (TypeError, ValueError):
+            rating = None
+
+        rating_count = best_record.get("rating_count")
+        try:
+            rating_count = int(rating_count) if rating_count is not None else None
+        except (TypeError, ValueError):
+            rating_count = None
+
+        opening_hours = _extract_opening_hours(best_record.get("opening_hours"))
+
+        confidence = 0.0
+        if best_distance is not None and self._match_distance_m > 0:
+            confidence = max(0.0, 1.0 - (best_distance / self._match_distance_m))
+
+        provenance: Dict[str, str] = {}
+        if name_value:
+            provenance["name"] = self.name
+        if categories:
+            provenance["categories"] = self.name
+        if rating is not None:
+            provenance["rating"] = self.name
+        if rating_count is not None:
+            provenance["rating_count"] = self.name
+        if opening_hours:
+            provenance["opening_hours"] = self.name
+
+        return ProviderResult(
+            provider=self.name,
+            place_id=place_id,
+            name=name_value,
+            categories=categories,
+            rating=rating,
+            rating_count=rating_count,
+            opening_hours_text=opening_hours,
+            raw={"row": best_record["properties"], "path": str(self._path)},
+            distance_m=best_distance,
+            confidence=confidence,
+            provenance=provenance,
+        )
+
+
+class CompositeProvider(ProviderBase):
+    """Combine multiple providers and merge their responses."""
+
+    def __init__(self, providers: Sequence[ProviderBase], label: Optional[str] = None) -> None:
+        self._providers = list(providers)
+        self.name = label or "+".join([p.name for p in self._providers]) or "null"
+
+    def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
+        aggregated_categories: List[str] = []
+        aggregated_raw: Dict[str, Any] = {}
+        aggregated_provenance: Dict[str, str] = {}
+        name_value: Optional[str] = None
+        place_id: Optional[str] = None
+        rating: Optional[float] = None
+        rating_count: Optional[int] = None
+        opening_hours: Optional[Sequence[str]] = None
+        best_distance: Optional[float] = None
+        best_confidence = 0.0
+        matched = False
+
+        for provider in self._providers:
+            result = provider.lookup(lat, lon, feature)
+            if not result:
+                continue
+            matched = True
+            aggregated_raw[provider.name] = result.raw
+            for field, source in result.provenance.items():
+                aggregated_provenance.setdefault(field, source)
+            if result.categories:
+                for cat in result.categories:
+                    if cat not in aggregated_categories:
+                        aggregated_categories.append(cat)
+            if name_value is None and result.name:
+                name_value = result.name
+            if place_id is None and result.place_id:
+                place_id = result.place_id
+            if rating is None and result.rating is not None:
+                rating = result.rating
+            if rating_count is None and result.rating_count is not None:
+                rating_count = result.rating_count
+            if opening_hours is None and result.opening_hours_text:
+                opening_hours = result.opening_hours_text
+            if result.distance_m is not None:
+                if best_distance is None or result.distance_m < best_distance:
+                    best_distance = result.distance_m
+            best_confidence = max(best_confidence, result.confidence)
+
+        if not matched:
+            return None
+
+        if aggregated_categories and "categories" not in aggregated_provenance:
+            aggregated_provenance["categories"] = self.name
+        if name_value and "name" not in aggregated_provenance:
+            aggregated_provenance["name"] = self.name
+        if place_id and "place_id" not in aggregated_provenance:
+            aggregated_provenance["place_id"] = self.name
+        if rating is not None and "rating" not in aggregated_provenance:
+            aggregated_provenance["rating"] = self.name
+        if rating_count is not None and "rating_count" not in aggregated_provenance:
+            aggregated_provenance["rating_count"] = self.name
+        if opening_hours and "opening_hours" not in aggregated_provenance:
+            aggregated_provenance["opening_hours"] = self.name
+
+        return ProviderResult(
+            provider=self.name,
+            place_id=place_id,
+            name=name_value,
+            categories=aggregated_categories,
+            rating=rating,
+            rating_count=rating_count,
+            opening_hours_text=opening_hours,
+            raw=aggregated_raw,
+            distance_m=best_distance,
+            confidence=best_confidence,
+            provenance=aggregated_provenance,
+        )
+
+    def close(self) -> None:
+        for provider in self._providers:
+            provider.close()
 
 def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> Optional[float]:
     """Compute approximate distance between two coordinates in meters."""
@@ -223,21 +667,92 @@ def haversine_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> 
     return 6371000.0 * c
 
 
-def select_provider(args: argparse.Namespace) -> ProviderBase:
-    if args.provider == "osm":
-        return NullProvider()
-    if args.provider in {"google", "osm_google"}:
-        if not args.google_api_key:
-            raise ValueError(
-                "Google API key missing. Provide --google-api-key or set GOOGLE_MAPS_API_KEY."
+def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
+    use_osm_labels = not args.disable_osm_labels
+
+    provider_names: List[str]
+    if args.providers:
+        provider_names = list(args.providers)
+    else:
+        if args.provider == "osm":
+            provider = NullProvider()
+            mode_parts = ["osm"] if use_osm_labels else []
+            provider_mode = "+".join(mode_parts) if mode_parts else "none"
+            return provider, use_osm_labels, provider_mode
+        if args.provider == "google":
+            provider_names = ["google"]
+            if not args.disable_osm_labels:
+                use_osm_labels = False
+        elif args.provider == "osm_google":
+            provider_names = ["google"]
+        else:
+            raise ValueError(f"Unknown provider {args.provider}")
+
+    provider_instances: List[ProviderBase] = []
+    for name in provider_names:
+        if name == "google":
+            if not args.google_api_key:
+                raise ValueError(
+                    "Google API key missing. Provide --google-api-key or set GOOGLE_MAPS_API_KEY."
+                )
+            provider_instances.append(
+                GooglePlacesProvider(
+                    api_key=args.google_api_key,
+                    search_radius_m=args.provider_radius,
+                    match_distance_m=args.match_distance,
+                    sleep_between_requests=args.request_sleep,
+                )
             )
-        return GooglePlacesProvider(
-            api_key=args.google_api_key,
-            search_radius_m=args.provider_radius,
-            match_distance_m=args.match_distance,
-            sleep_between_requests=args.request_sleep,
-        )
-    raise ValueError(f"Unknown provider {args.provider}")
+        elif name == "local_geojson":
+            if not args.local_geojson:
+                raise ValueError("--local-geojson must be provided when enabling local_geojson provider")
+            provider_instances.append(
+                LocalGeoJSONProvider(
+                    path=args.local_geojson,
+                    match_distance_m=args.match_distance,
+                    name_field=args.local_geojson_name_field,
+                    category_fields=args.local_geojson_category_fields,
+                    id_field=args.local_geojson_id_field,
+                    rating_field=args.local_geojson_rating_field,
+                    rating_count_field=args.local_geojson_rating_count_field,
+                    opening_hours_field=args.local_geojson_opening_hours_field,
+                )
+            )
+        elif name == "local_csv":
+            if not args.local_csv:
+                raise ValueError("--local-csv must be provided when enabling local_csv provider")
+            provider_instances.append(
+                LocalCSVProvider(
+                    path=args.local_csv,
+                    match_distance_m=args.match_distance,
+                    lat_field=args.local_csv_lat_field,
+                    lon_field=args.local_csv_lon_field,
+                    name_field=args.local_csv_name_field,
+                    category_fields=args.local_csv_category_fields,
+                    rating_field=args.local_csv_rating_field,
+                    rating_count_field=args.local_csv_rating_count_field,
+                    opening_hours_field=args.local_csv_opening_hours_field,
+                    id_field=args.local_csv_id_field,
+                )
+            )
+        else:
+            raise ValueError(f"Unknown provider name '{name}' in --providers")
+
+    if not provider_instances:
+        provider = NullProvider()
+        mode_parts = ["osm"] if use_osm_labels else []
+        provider_mode = "+".join(mode_parts) if mode_parts else "none"
+        return provider, use_osm_labels, provider_mode
+
+    provider_label = "+".join([instance.name for instance in provider_instances])
+    mode_parts = []
+    if use_osm_labels:
+        mode_parts.append("osm")
+    if provider_label:
+        mode_parts.append(provider_label)
+    provider_mode = "+".join(mode_parts) if mode_parts else "none"
+
+    return CompositeProvider(provider_instances, label=provider_label), use_osm_labels, provider_mode
 
 
 def normalize_category(value: str) -> str:
@@ -326,6 +841,33 @@ def enrich_features(
                 and not isinstance(provider_result.opening_hours_text, (str, bytes))
                 else None
             )
+            name_provenance = _field_provenance(provider_result, "name") if provider_result.name else ""
+            rating_provenance = (
+                _field_provenance(provider_result, "rating")
+                if provider_result.rating is not None
+                else ""
+            )
+            rating_count_provenance = (
+                _field_provenance(provider_result, "rating_count")
+                if provider_result.rating_count is not None
+                else ""
+            )
+            opening_hours_provenance = (
+                _field_provenance(provider_result, "opening_hours")
+                if opening_hours
+                else ""
+            )
+            place_id_provenance = (
+                _field_provenance(provider_result, "place_id")
+                if provider_result.place_id
+                else ""
+            )
+            categories_provenance = (
+                _field_provenance(provider_result, "categories")
+                if provider_categories
+                else ""
+            )
+            provider_sources = sorted({value for value in provider_result.provenance.values() if value})
             props.update(
                 {
                     "enriched_primary_label": enriched_primary,
@@ -334,17 +876,20 @@ def enrich_features(
                     "enriched_category_path": category_path,
                     "enriched_category_provenance": category_provenance,
                     "enriched_name": provider_result.name or "",
-                    "enriched_name_provenance": provider_result.provider,
+                    "enriched_name_provenance": name_provenance,
                     "enriched_rating": provider_result.rating,
-                    "enriched_rating_provenance": provider_result.provider if provider_result.rating is not None else "",
+                    "enriched_rating_provenance": rating_provenance,
                     "enriched_rating_count": provider_result.rating_count,
                     "enriched_opening_hours": opening_hours,
-                    "enriched_opening_hours_provenance": provider_result.provider if opening_hours else "",
+                    "enriched_opening_hours_provenance": opening_hours_provenance,
                     "provider_categories": provider_categories,
+                    "provider_categories_provenance": categories_provenance,
                     "provider_distance_m": provider_result.distance_m,
                     "provider_confidence": provider_result.confidence,
                     "provider_place_id": provider_result.place_id,
+                    "provider_place_id_provenance": place_id_provenance,
                     "provider_raw": provider_result.raw,
+                    "provider_sources": provider_sources,
                 }
             )
         else:
@@ -370,10 +915,13 @@ def enrich_features(
                     "enriched_opening_hours": None,
                     "enriched_opening_hours_provenance": "",
                     "provider_categories": [],
+                    "provider_categories_provenance": "",
                     "provider_distance_m": None,
                     "provider_confidence": 0.0,
                     "provider_place_id": None,
+                    "provider_place_id_provenance": "",
                     "provider_raw": {},
+                    "provider_sources": [],
                 }
             )
 
@@ -530,7 +1078,17 @@ def parse_args() -> argparse.Namespace:
         "--provider",
         choices=["osm", "google", "osm_google"],
         default="osm_google",
-        help="Enrichment provider selection. 'osm' keeps OSM-only attributes, 'google' relies solely on Google metadata, and 'osm_google' merges both.",
+        help=(
+            "Backward-compatible provider shortcut. 'osm' keeps OSM-only attributes, "
+            "'google' relies solely on Google metadata, and 'osm_google' merges both. "
+            "Use --providers for multi-source workflows."
+        ),
+    )
+    parser.add_argument(
+        "--providers",
+        nargs="+",
+        choices=["google", "local_geojson", "local_csv"],
+        help="Optional list of enrichment providers to combine. Overrides --provider when supplied.",
     )
     parser.add_argument(
         "--google-api-key",
@@ -556,6 +1114,95 @@ def parse_args() -> argparse.Namespace:
         help="Seconds to wait between provider requests to respect rate limits",
     )
     parser.add_argument(
+        "--disable-osm-labels",
+        action="store_true",
+        help="Disable combining OSM semantic labels with provider categories",
+    )
+    parser.add_argument(
+        "--local-geojson",
+        type=Path,
+        default=None,
+        help="Path to a local GeoJSON FeatureCollection used as an enrichment source",
+    )
+    parser.add_argument(
+        "--local-geojson-name-field",
+        default="name",
+        help="GeoJSON property field used as the preferred name",
+    )
+    parser.add_argument(
+        "--local-geojson-category-fields",
+        nargs="+",
+        default=["category", "type", "class", "primary", "secondary", "tertiary"],
+        help="GeoJSON property fields that contain category labels",
+    )
+    parser.add_argument(
+        "--local-geojson-id-field",
+        default=None,
+        help="GeoJSON property field that provides a stable identifier",
+    )
+    parser.add_argument(
+        "--local-geojson-rating-field",
+        default=None,
+        help="GeoJSON property field that stores rating values",
+    )
+    parser.add_argument(
+        "--local-geojson-rating-count-field",
+        default=None,
+        help="GeoJSON property field that stores rating counts",
+    )
+    parser.add_argument(
+        "--local-geojson-opening-hours-field",
+        default=None,
+        help="GeoJSON property field that stores opening hours",
+    )
+    parser.add_argument(
+        "--local-csv",
+        type=Path,
+        default=None,
+        help="Path to a local CSV file used as an enrichment source",
+    )
+    parser.add_argument(
+        "--local-csv-lat-field",
+        default="lat",
+        help="CSV column containing latitude values",
+    )
+    parser.add_argument(
+        "--local-csv-lon-field",
+        default="lon",
+        help="CSV column containing longitude values",
+    )
+    parser.add_argument(
+        "--local-csv-name-field",
+        default="name",
+        help="CSV column providing the preferred name",
+    )
+    parser.add_argument(
+        "--local-csv-category-fields",
+        nargs="+",
+        default=["category", "type", "class"],
+        help="CSV columns that contain category labels",
+    )
+    parser.add_argument(
+        "--local-csv-id-field",
+        default=None,
+        help="CSV column that provides a stable identifier",
+    )
+    parser.add_argument(
+        "--local-csv-rating-field",
+        default=None,
+        help="CSV column that stores rating values",
+    )
+    parser.add_argument(
+        "--local-csv-rating-count-field",
+        default=None,
+        help="CSV column that stores rating counts",
+    )
+    parser.add_argument(
+        "--local-csv-opening-hours-field",
+        default=None,
+        help="CSV column that stores opening hours",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
@@ -567,11 +1214,10 @@ def main() -> None:
     args = parse_args()
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
 
-    if args.provider in {"google", "osm_google"} and not args.google_api_key:
+    if not args.google_api_key:
         args.google_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
 
-    provider = select_provider(args)
-    use_osm_labels = args.provider != "google"
+    provider, use_osm_labels, provider_mode = select_provider(args)
     try:
         run_generation(
             lat=args.lat,
@@ -583,7 +1229,7 @@ def main() -> None:
             fallback_overpass=args.fallback_overpass,
             provider=provider,
             use_osm_labels=use_osm_labels,
-            provider_mode=args.provider,
+            provider_mode=provider_mode,
         )
     finally:
         provider.close()

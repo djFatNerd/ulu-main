@@ -82,12 +82,41 @@ switching between OSM-only, Google-only, and hybrid modes. Unlike the original
 workflow, the enriched CLI stores provider responses (including IDs and match
 confidence) so downstream users can trace the origin of each attribute.
 
+To combine multiple enrichment sources—such as Google Places, government
+GeoJSON catalogs, and cached CSV registries—pass the new `--providers` flag and
+corresponding data-field overrides. The CLI merges metadata sequentially while
+tracking field-level provenance:
+
+```bash
+python tools/multisource/generate_semantic_dataset_enriched.py \
+    40.7580 -73.9855 1000 \
+    --providers google local_geojson local_csv \
+    --local-geojson ./data/city_open_data.geojson \
+    --local-geojson-name-field official_name \
+    --local-csv ./data/business_registry.csv \
+    --local-csv-category-fields naics_description \
+    --output ./times_square_multi
+```
+
 If you prefer a one-liner, use the bundled helper script (remember to export a
 `GOOGLE_MAPS_API_KEY` environment variable when required):
 
 ```bash
 ./scripts/generate_times_square_enriched.sh
 ```
+
+For more granular control, `./scripts/multi-resource.sh` exposes per-provider
+toggles through environment variables:
+
+```bash
+ENABLE_GOOGLE=true \
+LOCAL_GEOJSON_PATH=./data/city_open_data.geojson \
+LOCAL_CSV_PATH=./data/licensed_businesses.csv \
+./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_multi
+```
+
+The helper validates local inputs, applies shared throttling parameters, and
+automatically constructs the appropriate `--providers` invocation.
 
 ## License
 

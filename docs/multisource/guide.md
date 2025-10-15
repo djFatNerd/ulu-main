@@ -121,3 +121,65 @@ The provider layer is pluggable—implement a subclass of `ProviderBase` that
 returns a `ProviderResult`. You can use the `NullProvider` as a template for
 providers that rely exclusively on OSM or open datasets. When adding new
 providers, update this guide with rate-limit guidance and attribution rules.
+
+### Additional open-data providers
+
+Beyond the bundled Google Places integration, the CLI now ships with
+providers that can operate entirely on offline or open datasets:
+
+- `local_geojson` ingests a FeatureCollection from disk (for example, Microsoft
+  building footprints, government POI catalogs, or Mapillary exports). Configure
+  the relevant property fields via `--local-geojson-*` flags so that names,
+  categories, ratings, and opening hours align with the enriched schema.
+- `local_csv` targets lightweight tabular sources such as business registries or
+  cached provider responses. Supply column names through
+  `--local-csv-*` arguments and the loader will build a spatial index for
+  centroid matching.
+
+Both providers respect the shared `--match-distance` tolerance and expose
+per-field provenance so that downstream systems can trace exactly which source
+contributed each attribute.
+
+### Multi-source orchestration
+
+Use the new `--providers` flag to combine multiple sources in a single pass.
+For example, the following merges OSM labels with a local GeoJSON catalog and a
+CSV business registry while still falling back to Google for gaps:
+
+```bash
+python tools/multisource/generate_semantic_dataset_enriched.py \
+    40.7580 -73.9855 1000 \
+    --providers google local_geojson local_csv \
+    --local-geojson ./data/government_poi.geojson \
+    --local-geojson-name-field official_name \
+    --local-geojson-category-fields sector division \
+    --local-csv ./data/business_registry.csv \
+    --local-csv-name-field trade_name \
+    --local-csv-category-fields naics_description \
+    --output ./times_square_multi
+```
+
+The lookup pipeline runs each provider sequentially, merging categories,
+names, and ratings while tracking field-level provenance. Disable the
+OSM taxonomy contribution (for Google-only or non-OSM datasets) with
+`--disable-osm-labels`.
+
+### Turnkey multi-resource script
+
+For reproducible runs, invoke `./scripts/multi-resource.sh`. The helper accepts
+the standard positional arguments (`LAT LON RADIUS [OUTPUT_DIR]`) and exposes
+per-provider toggles via environment variables:
+
+```bash
+ENABLE_GOOGLE=true \
+LOCAL_GEOJSON_PATH=./data/city_open_data.geojson \
+LOCAL_CSV_PATH=./data/licensed_businesses.csv \
+./scripts/multi-resource.sh 40.7580 -73.9855 1000 ./times_square_multi
+```
+
+Common overrides include `DISABLE_OSM_LABELS=true`,
+`LOCAL_GEOJSON_CATEGORY_FIELDS="primary secondary"`, and
+`LOCAL_CSV_CATEGORY_FIELDS="industry_subclass"`. The script validates file
+paths, applies shared throttling parameters, and forwards additional CLI flags
+to the Python entry point so teams can compose cost-effective, high-confidence
+datasets without editing code.
