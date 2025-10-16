@@ -133,21 +133,20 @@ providers that can operate entirely on offline or open datasets. The
 | `osm` | Only OpenStreetMap labels are kept; no external enrichment runs. |
 | `google` | Only Google Places data is requested (requires an API key). |
 | `osm_google` *(default)* | OSM labels combined with Google Places metadata when a key is supplied. |
-| `overture` | Only the Overture Maps Places API is queried for each building. |
-| `osm_overture` | OSM labels combined with the Overture Maps Places API. |
+| `overture` | Only the Overture Maps dataset is downloaded for each building via the `overturemaps` CLI. |
+| `osm_overture` | OSM labels combined with the Overture Maps downloads. |
 
 You can supply `--providers` for more complex mixes—for example
 `--providers overture local_geojson`—but the shortcuts above are often
 enough for quick runs.
 
-- `overture` queries the [Overture Maps Places API](https://docs.overturemaps.org/)
-  for building attributes. The endpoint is freely accessible for non-commercial
-  use and returns a unified schema that merges OpenStreetMap, Microsoft, Meta,
-  Esri, and other contributors. Set `--provider overture` to rely exclusively on
-  Overture metadata, or combine it with OSM via `--provider osm_overture` or the
-  generic `--providers overture ...` flag. You can customize the query radius,
-  requested property bags, and optional bearer token through the
-  `--overture-*` arguments:
+- `overture` downloads the [Overture Maps](https://docs.overturemaps.org/)
+  building dataset using the `overturemaps` Python package. Install it with
+  `pip install overturemaps` so the bundled CLI is available. Set
+  `--provider overture` to rely exclusively on Overture metadata, or combine it
+  with OSM via `--provider osm_overture` or the generic
+  `--providers overture ...` flag. You can customize the query radius and
+  property extraction through the `--overture-*` arguments:
 
   ```bash
   python tools/multisource/generate_semantic_dataset_enriched.py \
@@ -159,12 +158,10 @@ enough for quick runs.
       --request-sleep 0.1
   ```
 
-  If the public endpoint ever requires authentication, supply a token via
-  `--overture-auth-token` or the `OVERTURE_AUTH_TOKEN` environment variable and
-  pass `--overture-timeout` to adjust network tolerance. If your network
-  requires an HTTP proxy, configure it with `--overture-proxy` or the
-  `OVERTURE_PROXY` environment variable. The provider falls back to OSM labels
-  when Overture does not report categories.
+  The CLI currently accesses public dataset releases and does not require
+  authentication. Use `--overture-timeout` to adjust tolerance for long-running
+  downloads. The provider falls back to OSM labels when Overture does not report
+  categories.
 
   To run fully offline, pre-populate the cache directory (default
   `data/overture_cache`) with responses gathered during an online session, then
@@ -172,32 +169,6 @@ enough for quick runs.
   `OVERTURE_CACHE_ONLY=1`. In cache-only mode the script never contacts the API;
   if a bounding box is missing, the corresponding buildings will simply be left
   without Overture enrichment.
-
-- `overture` queries the [Overture Maps Places API](https://docs.overturemaps.org/)
-  for building attributes. The endpoint is freely accessible for non-commercial
-  use and returns a unified schema that merges OpenStreetMap, Microsoft, Meta,
-  Esri, and other contributors. Set `--provider overture` to rely exclusively on
-  Overture metadata, or combine it with OSM via `--provider osm_overture` or the
-  generic `--providers overture ...` flag. You can customize the query radius,
-  requested property bags, and optional bearer token through the
-  `--overture-*` arguments:
-
-  ```bash
-  python tools/multisource/generate_semantic_dataset_enriched.py \
-      48.8566 2.3522 1500 \
-      --provider osm_overture \
-      --overture-include-fields names categories addresses \
-      --overture-category-fields categories function building.use \
-      --overture-name-fields name names.primary \
-      --request-sleep 0.1
-  ```
-
-  If the public endpoint ever requires authentication, supply a token via
-  `--overture-auth-token` or the `OVERTURE_AUTH_TOKEN` environment variable and
-  pass `--overture-timeout` to adjust network tolerance. If your network
-  requires an HTTP proxy, configure it with `--overture-proxy` or the
-  `OVERTURE_PROXY` environment variable. The provider falls back to OSM labels
-  when Overture does not report categories.
 
 - `local_geojson` ingests a FeatureCollection from disk (for example, Microsoft
   building footprints, government POI catalogs, or Mapillary exports). Configure

@@ -24,11 +24,6 @@ PROVIDER_RADIUS="${PROVIDER_RADIUS:-50.0}"
 REQUEST_SLEEP="${REQUEST_SLEEP:-0.2}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
-if [[ -z "${OVERTURE_AUTH_TOKEN:-}" ]]; then
-  echo "OVERTURE_AUTH_TOKEN must be set for Overture provider workflows." >&2
-  exit 2
-fi
-
 CMD=(
   python tools/multisource/generate_semantic_dataset_enriched.py
   "$LAT" "$LON" "$RADIUS"
@@ -39,7 +34,6 @@ CMD=(
   --request-sleep "$REQUEST_SLEEP"
   --log-level "$LOG_LEVEL"
   --provider osm_overture
-  --overture-auth-token "$OVERTURE_AUTH_TOKEN"
 )
 
 if [[ -n "${OVERPASS_URL:-}" ]]; then
@@ -80,10 +74,6 @@ fi
 
 if [[ -n "${OVERTURE_TIMEOUT:-}" ]]; then
   CMD+=(--overture-timeout "$OVERTURE_TIMEOUT")
-fi
-
-if [[ -n "${OVERTURE_PROXY:-}" ]]; then
-  CMD+=(--overture-proxy "$OVERTURE_PROXY")
 fi
 
 exec "${CMD[@]}"

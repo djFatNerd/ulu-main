@@ -30,20 +30,26 @@ obtain credentials (when needed), typical costs, and operational tips.
   should respect its fair-use policy. For large batch jobs consider hosting your
   own Overpass instance or staggering requests with `REQUEST_SLEEP`.
 
-### B. Overture Maps Places API
+### B. Overture Maps downloads
 
 - **What it provides** – global, community-maintained place and building
   attributes (names, categories, brand metadata) from the Overture Maps
   Foundation.
-- **How to obtain an access token** –
-  1. Visit the [Overture Maps developer portal](https://account.overturemapsapi.com/).
-  2. Sign in with a GitHub account and create a new application.
-  3. Generate an API token and copy it to a secure location.
-  4. Export it as `OVERTURE_AUTH_TOKEN` before running the scripts.
-- **Cost and usage notes** – Overture currently offers free access with rate
-  limits while the API is in preview. Monitor the portal for production pricing
-  changes. Rotate tokens if they are compromised and avoid committing them to
-  version control.
+- **How we access it** – install the
+  [`overturemaps` Python package](https://pypi.org/project/overturemaps/) and use
+  its bundled CLI to download GeoJSON for the query bounding box. The scripts in
+  this repository invoke `python -m overturemaps.cli download ...` under the
+  hood, so make sure the package is available in the active environment. You can
+  test connectivity manually:
+
+  ```bash
+  pip install overturemaps
+  overturemaps download --bbox=-71.068,42.353,-71.058,42.363 -f geojson --type=building -o sample.geojson
+  ```
+- **Credential requirements** – none. Data is fetched from the public Overture
+  dataset releases; no API token is needed.
+- **Cost and usage notes** – downloads are free but respect the data licence and
+  avoid hammering the service with very fine-grained bounding boxes.
 
 ### C. Google Places API
 
@@ -94,12 +100,12 @@ each section.
 | Combination | Script | Providers used | Required credentials |
 | --- | --- | --- | --- |
 | 1. OSM only | `run_osm.sh` | OSM labels only | none |
-| 2. Overture only | `run_overture.sh` | Overture Places | `OVERTURE_AUTH_TOKEN` |
+| 2. Overture only | `run_overture.sh` | Overture downloads | `overturemaps` package |
 | 3. Google only | `run_google.sh` | Google Places | `GOOGLE_MAPS_API_KEY` |
 | 4. OSM + Google | `run_osm_google.sh` | OSM labels merged with Google Places | `GOOGLE_MAPS_API_KEY` |
-| 5. OSM + Overture | `run_osm_overture.sh` | OSM labels merged with Overture Places | `OVERTURE_AUTH_TOKEN` |
-| 6. Overture + Google | `run_overture_google.sh` | Overture Places + Google Places (no OSM labels) | `OVERTURE_AUTH_TOKEN`, `GOOGLE_MAPS_API_KEY` |
-| 7. OSM + Overture + Google | `run_osm_overture_google.sh` | OSM labels merged with Overture and Google Places | `OVERTURE_AUTH_TOKEN`, `GOOGLE_MAPS_API_KEY` |
+| 5. OSM + Overture | `run_osm_overture.sh` | OSM labels merged with Overture downloads | `overturemaps` package |
+| 6. Overture + Google | `run_overture_google.sh` | Overture downloads + Google Places (no OSM labels) | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
+| 7. OSM + Overture + Google | `run_osm_overture_google.sh` | OSM labels merged with Overture and Google Places | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
 
 ### Combination 1 – OSM only
 
@@ -113,21 +119,21 @@ required.
 ### Combination 2 – Overture only
 
 ```
-OVERTURE_AUTH_TOKEN=... ./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
+./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
 ```
 
 This workflow replaces OSM semantic labels with attributes from the Overture
-Maps Places API. Optional environment overrides:
+downloads handled via the `overturemaps` CLI. Optional environment overrides:
 
-- `OVERTURE_ENDPOINT` – alternate API endpoint.
-- `OVERTURE_THEME` – Overture theme (default `buildings`).
+- `OVERTURE_THEME` – dataset theme (default `buildings`).
 - `OVERTURE_LIMIT` – per-request feature cap.
 - `OVERTURE_INCLUDE_FIELDS`, `OVERTURE_CATEGORY_FIELDS`, `OVERTURE_NAME_FIELDS`
-  – space-delimited field overrides.
-- `OVERTURE_TIMEOUT` – HTTP timeout in seconds.
-- `OVERTURE_PROXY` – HTTP(S) proxy URL if your environment requires tunnelling provider traffic.
+  – space-delimited field overrides for property extraction.
+- `OVERTURE_TIMEOUT` – CLI execution timeout in seconds.
 - `OVERTURE_CACHE_DIR` – directory used to persist Overture responses for reuse (default `data/overture_cache`).
-- `--overture-cache-only` / `OVERTURE_CACHE_ONLY=1` – disable live API calls and rely solely on files already present in the
+- `--overture-cache-only` / `OVERTURE_CACHE_ONLY=1` – disable fresh downloads and rely solely on cached payloads.
+- `OVERTURE_CACHE_DIR` – directory used to persist Overture responses for reuse (default `data/overture_cache`).
+- `--overture-cache-only` / `OVERTURE_CACHE_ONLY=1` – disable fresh downloads and rely solely on files already present in the
   cache directory. Populate the cache by running the workflow once while online or by copying pre-downloaded payloads into the
   directory using the naming scheme produced by the online runs.
 
@@ -152,7 +158,7 @@ hierarchy and additional provider fields (ratings, hours, etc.).
 ### Combination 5 – OSM + Overture
 
 ```
-OVERTURE_AUTH_TOKEN=... ./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
+./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
 ```
 
 Keeps OSM labels while enriching features with Overture-provided names and
@@ -162,7 +168,6 @@ Combination 2.
 ### Combination 6 – Overture + Google
 
 ```
-OVERTURE_AUTH_TOKEN=... \
 GOOGLE_MAPS_API_KEY=... ./scripts/run_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture_google
 ```
 
@@ -172,6 +177,8 @@ suppressing the original OSM semantic labels.
 ### Combination 7 – OSM + Overture + Google
 
 ```
+GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
+```
 
 ## Resources
 
@@ -180,9 +187,9 @@ below are built on top of these components.
 
 - **A. OpenStreetMap (OSM)** – public geometry and semantic labels accessed via
   the Overpass API. This is always the geometric foundation of the dataset.
-- **B. Overture Maps Places API** – global building/business attributes donated
-  by the Overture community (Meta, Microsoft, Amazon, Esri, etc.). Requires an
-  API token via `OVERTURE_AUTH_TOKEN`.
+- **B. Overture Maps downloads** – global building/business attributes donated
+  by the Overture community (Meta, Microsoft, Amazon, Esri, etc.) retrieved via
+  the `overturemaps` CLI.
 - **C. Google Places API** – commercial point-of-interest metadata (official
   names, categories, ratings, and opening hours). Requires a
   `GOOGLE_MAPS_API_KEY` (or `GOOGLE_API_KEY`).
@@ -212,12 +219,12 @@ each section.
 | Combination | Script | Providers used | Required credentials |
 | --- | --- | --- | --- |
 | 1. OSM only | `run_osm.sh` | OSM labels only | none |
-| 2. Overture only | `run_overture.sh` | Overture Places | `OVERTURE_AUTH_TOKEN` |
+| 2. Overture only | `run_overture.sh` | Overture downloads | `overturemaps` package |
 | 3. Google only | `run_google.sh` | Google Places | `GOOGLE_MAPS_API_KEY` |
 | 4. OSM + Google | `run_osm_google.sh` | OSM labels merged with Google Places | `GOOGLE_MAPS_API_KEY` |
-| 5. OSM + Overture | `run_osm_overture.sh` | OSM labels merged with Overture Places | `OVERTURE_AUTH_TOKEN` |
-| 6. Overture + Google | `run_overture_google.sh` | Overture Places + Google Places (no OSM labels) | `OVERTURE_AUTH_TOKEN`, `GOOGLE_MAPS_API_KEY` |
-| 7. OSM + Overture + Google | `run_osm_overture_google.sh` | OSM labels merged with Overture and Google Places | `OVERTURE_AUTH_TOKEN`, `GOOGLE_MAPS_API_KEY` |
+| 5. OSM + Overture | `run_osm_overture.sh` | OSM labels merged with Overture downloads | `overturemaps` package |
+| 6. Overture + Google | `run_overture_google.sh` | Overture downloads + Google Places (no OSM labels) | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
+| 7. OSM + Overture + Google | `run_osm_overture_google.sh` | OSM labels merged with Overture and Google Places | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
 
 ### Combination 1 – OSM only
 
@@ -231,19 +238,17 @@ required.
 ### Combination 2 – Overture only
 
 ```
-OVERTURE_AUTH_TOKEN=... ./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
+./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
 ```
 
 This workflow replaces OSM semantic labels with attributes from the Overture
-Maps Places API. Optional environment overrides:
+downloads handled via the `overturemaps` CLI. Optional environment overrides:
 
-- `OVERTURE_ENDPOINT` – alternate API endpoint.
-- `OVERTURE_THEME` – Overture theme (default `buildings`).
+- `OVERTURE_THEME` – dataset theme (default `buildings`).
 - `OVERTURE_LIMIT` – per-request feature cap.
 - `OVERTURE_INCLUDE_FIELDS`, `OVERTURE_CATEGORY_FIELDS`, `OVERTURE_NAME_FIELDS`
-  – space-delimited field overrides.
-- `OVERTURE_TIMEOUT` – HTTP timeout in seconds.
-- `OVERTURE_PROXY` – HTTP(S) proxy URL if your environment requires tunnelling provider traffic.
+  – space-delimited field overrides for property extraction.
+- `OVERTURE_TIMEOUT` – CLI execution timeout in seconds.
 
 ### Combination 3 – Google only
 
@@ -266,7 +271,7 @@ hierarchy and additional provider fields (ratings, hours, etc.).
 ### Combination 5 – OSM + Overture
 
 ```
-OVERTURE_AUTH_TOKEN=... ./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
+./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
 ```
 
 Keeps OSM labels while enriching features with Overture-provided names and
@@ -276,16 +281,8 @@ Combination 2.
 ### Combination 6 – Overture + Google
 
 ```
-OVERTURE_AUTH_TOKEN=... \
 GOOGLE_MAPS_API_KEY=... ./scripts/run_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture_google
 ```
-OVERTURE_AUTH_TOKEN=... \
-GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
-```
-
-Uses OSM geometry and labels as the backbone while layering both provider APIs
-on top. Ideal when you want the fullest set of enrichment fields in a single
-pass.
 
 Outputs a provider-only dataset that fuses Overture and Google attributes while
 suppressing the original OSM semantic labels.
@@ -293,7 +290,6 @@ suppressing the original OSM semantic labels.
 ### Combination 7 – OSM + Overture + Google
 
 ```
-OVERTURE_AUTH_TOKEN=... \
 GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
 ```
 
