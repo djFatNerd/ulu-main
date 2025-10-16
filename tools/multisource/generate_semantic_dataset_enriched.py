@@ -4,17 +4,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import importlib.util
 import json
 import logging
 import math
 import os
+import re
+import subprocess
 import time
-from hashlib import md5
 from dataclasses import dataclass
+from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
-
-import re
 
 from shapely.geometry import Point, box, shape
 from shapely.strtree import STRtree
@@ -311,9 +312,13 @@ class OvertureBuildingsProvider(ProviderBase):
         proxy: Optional[str] = None,
         cache_only: bool = False,
     ) -> None:
-        if not base_url:
-            raise ValueError("Overture base URL cannot be empty")
-        self._endpoint = base_url.rstrip("/")
+        del auth_token  # legacy parameter retained for CLI compatibility
+        del proxy
+        if importlib.util.find_spec("overturemaps") is None:
+            raise RuntimeError(
+                "overturemaps package is required for the Overture provider. Install it with 'pip install overturemaps'."
+            )
+        self._endpoint = base_url.rstrip("/") if base_url else "https://api.overturemaps.org/"
         self._theme = theme
         self._search_radius_m = search_radius_m
         self._match_distance_m = match_distance_m
@@ -324,22 +329,30 @@ class OvertureBuildingsProvider(ProviderBase):
         self._name_fields = list(name_fields)
         self._timeout = timeout
         self._cache_only = cache_only
-        self._requests = get_requests()
-        self._session = None
-        if not self._cache_only:
-            self._session = self._requests.Session()
-            self._session.trust_env = False
-            self._session.verify = self._requests.certs.where()
-            if auth_token:
-                self._session.headers.update({"Authorization": f"Bearer {auth_token}"})
-            if proxy:
-                self._session.proxies = {"http": proxy, "https": proxy}
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._dataset_type = self._derive_dataset_type(theme)
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
             time.sleep(self._sleep_between_requests)
+
+    @staticmethod
+    def _derive_dataset_type(theme: str) -> str:
+        normalized = (theme or "").strip().lower()
+        if not normalized:
+            return "building"
+        mapping = {
+            "buildings": "building",
+            "building": "building",
+            "places": "place",
+            "place": "place",
+        }
+        if normalized in mapping:
+            return mapping[normalized]
+        if normalized.endswith("s") and len(normalized) > 1:
+            return normalized[:-1]
+        return normalized
 
     def _bbox_from_radius(self, lat: float, lon: float) -> Tuple[float, float, float, float]:
         if self._search_radius_m <= 0:
@@ -404,7 +417,7 @@ class OvertureBuildingsProvider(ProviderBase):
             LOGGER.debug("Loaded cached Overture data from %s", cache_path)
             return payload
 
-    def _download_payload(self, params: Dict[str, Any], cache_path: Path) -> None:
+    def _download_payload(self, bbox: str, cache_path: Path) -> None:
         tmp_path = cache_path.with_suffix(".tmp")
         if tmp_path.exists():
             try:
@@ -413,68 +426,54 @@ class OvertureBuildingsProvider(ProviderBase):
                 pass
         self._throttle()
         start = time.time()
-        downloaded = 0
-        last_emit = 0.0
-        chunk_size = 8192
         label = cache_path.name
-        progress_displayed = False
-        if self._session is None:
-            raise RuntimeError("Overture HTTP session is unavailable in cache-only mode")
+        cmd = [
+            sys.executable,
+            "-m",
+            "overturemaps.cli",
+            "download",
+            f"--bbox={bbox}",
+            "-f",
+            "geojson",
+            "--type",
+            self._dataset_type,
+            "-o",
+            str(tmp_path),
+        ]
+        if self._limit:
+            cmd.extend(["--limit", str(self._limit)])
+        LOGGER.debug("Running overturemaps CLI: %s", " ".join(cmd))
         try:
-            with self._session.get(
-                self._endpoint,
-                params=params,
-                timeout=self._timeout,
-                stream=True,
-            ) as response:
-                response.raise_for_status()
-                total = int(response.headers.get("Content-Length") or 0)
-                with tmp_path.open("wb") as handle:
-                    for chunk in response.iter_content(chunk_size=chunk_size):
-                        if not chunk:
-                            continue
-                        handle.write(chunk)
-                        downloaded += len(chunk)
-                        now = time.time()
-                        if total:
-                            percent = downloaded / total * 100.0
-                            if downloaded == total or now - last_emit >= 0.2:
-                                rate = downloaded / max(now - start, 1e-6)
-                                sys.stderr.write(
-                                    f"\rDownloading {label}: {percent:5.1f}% "
-                                    f"({downloaded/1024:.1f} KiB/{total/1024:.1f} KiB, "
-                                    f"{rate/1024:.1f} KiB/s)"
-                                )
-                                sys.stderr.flush()
-                                last_emit = now
-                                progress_displayed = True
-                        else:
-                            if now - last_emit >= 0.2:
-                                sys.stderr.write(
-                                    f"\rDownloading {label}: {downloaded/1024:.1f} KiB"
-                                )
-                                sys.stderr.flush()
-                                last_emit = now
-                                progress_displayed = True
-        except Exception:
-            try:
-                if tmp_path.exists():
-                    tmp_path.unlink()
-            except OSError:
-                pass
-            raise
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=max(self._timeout, 0) or None,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.strip() if exc.stderr else ""
+            stdout = exc.stdout.strip() if exc.stdout else ""
+            message = "; ".join(part for part in [stdout, stderr] if part)
+            raise RuntimeError(
+                f"overturemaps CLI failed for bbox {bbox} (exit {exc.returncode}): {message}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(
+                f"overturemaps CLI timed out for bbox {bbox} after {self._timeout} seconds"
+            ) from exc
         else:
+            duration = time.time() - start
+            LOGGER.debug(
+                "Downloaded Overture data for %s in %.2f seconds via overturemaps CLI", label, duration
+            )
             tmp_path.replace(cache_path)
-        finally:
-            if progress_displayed:
-                sys.stderr.write("\n")
-                sys.stderr.flush()
 
     def _load_payload(
         self,
         lat: float,
         lon: float,
-        params: Dict[str, Any],
+        bbox: str,
         cache_path: Path,
     ) -> Optional[Dict[str, Any]]:
         payload = self._read_cached_payload(cache_path)
@@ -483,18 +482,15 @@ class OvertureBuildingsProvider(ProviderBase):
         if self._cache_only:
             LOGGER.warning(
                 "Overture cache miss for bbox %s near %.6f, %.6f (cache-only mode).",
-                params.get("bbox"),
+                bbox,
                 lat,
                 lon,
             )
             LOGGER.info("Set OVERTURE_CACHE_DIR to a directory containing pre-downloaded responses.")
             return None
         try:
-            LOGGER.info("Downloading Overture data for bbox %s", params.get("bbox"))
-            self._download_payload(params, cache_path)
-        except self._requests.exceptions.RequestException as exc:
-            LOGGER.warning("Overture download failed near %.6f, %.6f: %s", lat, lon, exc)
-            return None
+            LOGGER.info("Downloading Overture data for bbox %s via overturemaps", bbox)
+            self._download_payload(bbox, cache_path)
         except Exception as exc:
             LOGGER.warning("Unexpected error downloading Overture data near %.6f, %.6f: %s", lat, lon, exc)
             return None
@@ -509,24 +505,21 @@ class OvertureBuildingsProvider(ProviderBase):
         return payload
 
     def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
-        params: Dict[str, Any] = {
-            "theme": self._theme,
-            "limit": self._limit,
-        }
         west, south, east, north = self._bbox_from_radius(lat, lon)
         bbox_key = f"{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}"
-        params["bbox"] = f"{west},{south},{east},{north}"
-        if self._include_fields:
-            params["include"] = ",".join(self._include_fields)
+        bbox_value = f"{west},{south},{east},{north}"
 
         cache_path = self._cache_path(bbox_key)
-        payload = self._load_payload(lat, lon, params, cache_path)
+        payload = self._load_payload(lat, lon, bbox_value, cache_path)
         if payload is None:
             return None
 
         features = payload.get("features") if isinstance(payload, dict) else None
         if not features:
             return None
+
+        if self._limit and len(features) > self._limit:
+            features = features[: self._limit]
 
         best_candidate: Optional[Dict[str, Any]] = None
         best_distance: Optional[float] = None
@@ -1109,12 +1102,6 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                 )
             )
         elif name == "overture":
-            if not args.overture_auth_token and not args.overture_cache_only:
-                raise ValueError(
-                    "Overture provider requested but no authentication token supplied. "
-                    "Provide --overture-auth-token or set OVERTURE_AUTH_TOKEN, or enable --overture-cache-only "
-                    "to rely solely on cached responses."
-                )
             provider_instances.append(
                 OvertureBuildingsProvider(
                     base_url=args.overture_endpoint,
@@ -1538,24 +1525,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overture-endpoint",
         default="https://api.overturemaps.org/places/v1/places",
-        help="Overture Maps Places API endpoint used for building lookups",
+        help=(
+            "Deprecated Overture API endpoint flag retained for backwards compatibility. "
+            "Ignored when using the overturemaps CLI downloads."
+        ),
     )
     parser.add_argument(
         "--overture-theme",
         default="buildings",
-        help="Theme parameter passed to the Overture Places API",
+        help="Dataset theme passed to the overturemaps CLI (default: buildings)",
     )
     parser.add_argument(
         "--overture-limit",
         type=int,
         default=25,
-        help="Maximum number of features retrieved per Overture API request",
+        help="Maximum number of features retrieved per overturemaps CLI download",
     )
     parser.add_argument(
         "--overture-include-fields",
         nargs="*",
         default=["names", "categories", "addresses"],
-        help="Optional list of fields requested via the Overture include= parameter",
+        help="Optional list of fields to retain from downloaded Overture payloads (used for cache keying)",
     )
     parser.add_argument(
         "--overture-category-fields",
@@ -1573,17 +1563,23 @@ def parse_args() -> argparse.Namespace:
         "--overture-timeout",
         type=float,
         default=20.0,
-        help="HTTP timeout in seconds for Overture API requests",
+        help="Timeout in seconds for overturemaps CLI invocations",
     )
     parser.add_argument(
         "--overture-auth-token",
         default=os.environ.get("OVERTURE_AUTH_TOKEN"),
-        help="Authentication token for the Overture Places API (default: OVERTURE_AUTH_TOKEN env variable)",
+        help=(
+            "Deprecated Overture API token (default: OVERTURE_AUTH_TOKEN env variable). "
+            "No longer required when using overturemaps downloads."
+        ),
     )
     parser.add_argument(
         "--overture-proxy",
         default=os.environ.get("OVERTURE_PROXY"),
-        help="Proxy URL for Overture HTTP requests (default: OVERTURE_PROXY env variable)",
+        help=(
+            "Deprecated proxy flag retained for backwards compatibility. "
+            "Ignored by the overturemaps CLI workflow."
+        ),
     )
     parser.add_argument(
         "--overture-cache-dir",
