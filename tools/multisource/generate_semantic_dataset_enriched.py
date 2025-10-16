@@ -12,10 +12,10 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from hashlib import md5
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from shapely.geometry import Point, box, shape
 from shapely.strtree import STRtree
@@ -62,6 +62,19 @@ class ProviderResult:
     distance_m: Optional[float]
     confidence: float
     provenance: Dict[str, str]
+
+
+@dataclass
+class OvertureCliOptions:
+    """Configuration detected for the overturemaps CLI interface."""
+
+    bbox_flag: str = "--bbox"
+    bbox_requires_separate: bool = False
+    theme_flag: str = "--type"
+    theme_uses_dataset_type: bool = True
+    limit_flag: Optional[str] = None
+    format_flag: str = "-f"
+    available_flags: Set[str] = field(default_factory=set)
 
 
 class ProviderBase:
@@ -332,6 +345,75 @@ class OvertureBuildingsProvider(ProviderBase):
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._dataset_type = self._derive_dataset_type(theme)
+        self._cli_options = self._detect_cli_options()
+
+    def _detect_cli_options(self) -> OvertureCliOptions:
+        """Inspect the overturemaps CLI to pick compatible flag names."""
+
+        options = OvertureCliOptions()
+        help_cmd = [sys.executable, "-m", "overturemaps.cli", "download", "--help"]
+        try:
+            result = subprocess.run(
+                help_cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.CalledProcessError) as exc:
+            LOGGER.debug("Unable to introspect overturemaps CLI, using defaults: %s", exc)
+            return options
+
+        help_text = f"{result.stdout or ''}\n{result.stderr or ''}"
+        flags = {
+            match.lower()
+            for match in re.findall(r"--[a-z0-9][a-z0-9_-]*", help_text, flags=re.IGNORECASE)
+        }
+        options.available_flags = flags
+
+        for flag, uses_dataset in (
+            ("--theme", False),
+            ("--collection", False),
+            ("--dataset", False),
+            ("--type", True),
+        ):
+            if flag in flags:
+                options.theme_flag = flag
+                options.theme_uses_dataset_type = uses_dataset
+                break
+
+        for flag in ("--limit", "--max-results", "--maxresults"):
+            if flag in flags:
+                options.limit_flag = flag
+                break
+
+        for flag in ("--bbox", "--bounds"):
+            if flag in flags:
+                options.bbox_flag = flag
+                break
+
+        if "--format" in flags:
+            options.format_flag = "--format"
+
+        help_upper = help_text.upper()
+        bbox_token = options.bbox_flag.upper()
+        bbox_re = re.escape(bbox_token)
+        if re.search(rf"{bbox_re}\s*(?:<[^>]+>\s*){4}", help_upper):
+            options.bbox_requires_separate = True
+        elif f"{bbox_token} FLOAT FLOAT FLOAT FLOAT" in help_upper or f"{bbox_token} NUMBER NUMBER NUMBER NUMBER" in help_upper:
+            options.bbox_requires_separate = True
+        elif f"{bbox_token} TEXT" in help_upper:
+            options.bbox_requires_separate = False
+
+        LOGGER.debug(
+            "Detected overturemaps CLI flags: bbox=%s (separate=%s), theme=%s, limit=%s, format=%s",
+            options.bbox_flag,
+            options.bbox_requires_separate,
+            options.theme_flag,
+            options.limit_flag or "disabled",
+            options.format_flag,
+        )
+        return options
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
@@ -417,6 +499,125 @@ class OvertureBuildingsProvider(ProviderBase):
             LOGGER.debug("Loaded cached Overture data from %s", cache_path)
             return payload
 
+    def _build_cli_command_variants(self, bbox: str, tmp_path: Path) -> List[List[str]]:
+        """Construct a set of overturemaps CLI invocations to try."""
+
+        commands: List[List[str]] = []
+        seen: Set[Tuple[str, ...]] = set()
+        bbox_parts = [part.strip() for part in bbox.split(",") if part.strip()]
+        available_flags = self._cli_options.available_flags
+
+        def flag_allowed(flag: str) -> bool:
+            return not available_flags or flag.lower() in available_flags
+
+        theme_candidates: List[Tuple[str, str]] = []
+        for flag, uses_dataset in [
+            (self._cli_options.theme_flag, self._cli_options.theme_uses_dataset_type),
+            ("--theme", False),
+            ("--type", True),
+            ("--dataset", False),
+            ("--collection", False),
+        ]:
+            lower_flag = flag.lower()
+            if any(existing_flag.lower() == lower_flag for existing_flag, _ in theme_candidates):
+                continue
+            if lower_flag == self._cli_options.theme_flag or flag_allowed(lower_flag):
+                value = self._dataset_type if uses_dataset else self._theme
+                theme_candidates.append((flag, value))
+        if not theme_candidates:
+            theme_candidates.append(("--type", self._dataset_type))
+
+        limit_candidates: List[Optional[Tuple[str, str]]] = [None]
+        if self._limit:
+            limit_candidates = []
+            candidate_flags = []
+            if self._cli_options.limit_flag:
+                candidate_flags.append(self._cli_options.limit_flag)
+            candidate_flags.extend(["--limit", "--max-results"])
+            seen_limit: Set[str] = set()
+            for flag in candidate_flags:
+                if not flag:
+                    continue
+                lower_flag = flag.lower()
+                if lower_flag in seen_limit:
+                    continue
+                if lower_flag == (self._cli_options.limit_flag or "").lower() or flag_allowed(lower_flag):
+                    limit_candidates.append((flag, str(self._limit)))
+                    seen_limit.add(lower_flag)
+            limit_candidates.append(None)
+
+        bbox_flag_candidates: List[str] = []
+        for flag in [self._cli_options.bbox_flag, "--bbox", "--bounds"]:
+            lower_flag = flag.lower()
+            if any(existing.lower() == lower_flag for existing in bbox_flag_candidates):
+                continue
+            if lower_flag == self._cli_options.bbox_flag or flag_allowed(lower_flag):
+                bbox_flag_candidates.append(flag)
+        if not bbox_flag_candidates:
+            bbox_flag_candidates.append("--bbox")
+
+        if self._cli_options.bbox_requires_separate:
+            bbox_modes = ["separate", "comma", "equals"]
+        else:
+            bbox_modes = ["comma", "equals", "separate"]
+
+        theme_modes = ["space", "equals"]
+        format_flag = self._cli_options.format_flag
+
+        for bbox_flag in bbox_flag_candidates:
+            for bbox_mode in bbox_modes:
+                for theme_flag, theme_value in theme_candidates:
+                    for theme_mode in theme_modes:
+                        for limit_option in limit_candidates:
+                            cmd: List[str] = [
+                                sys.executable,
+                                "-m",
+                                "overturemaps.cli",
+                                "download",
+                            ]
+                            if bbox_mode == "equals":
+                                cmd.append(f"{bbox_flag}={bbox}")
+                            elif bbox_mode == "comma":
+                                cmd.extend([bbox_flag, bbox])
+                            else:
+                                if len(bbox_parts) != 4:
+                                    continue
+                                cmd.append(bbox_flag)
+                                cmd.extend(bbox_parts)
+                            cmd.extend([format_flag, "geojson"])
+                            if theme_mode == "equals":
+                                cmd.append(f"{theme_flag}={theme_value}")
+                            else:
+                                cmd.extend([theme_flag, theme_value])
+                            if limit_option:
+                                limit_flag, limit_value = limit_option
+                                cmd.extend([limit_flag, limit_value])
+                            cmd.extend(["-o", str(tmp_path)])
+                            key = tuple(cmd)
+                            if key not in seen:
+                                seen.add(key)
+                                commands.append(cmd)
+
+        if not commands:
+            fallback_cmd = [
+                sys.executable,
+                "-m",
+                "overturemaps.cli",
+                "download",
+                f"--bbox={bbox}",
+                "-f",
+                "geojson",
+                "--type",
+                self._dataset_type,
+                "-o",
+                str(tmp_path),
+            ]
+            if self._limit:
+                fallback_cmd.extend(["--limit", str(self._limit)])
+            commands.append(fallback_cmd)
+
+        return commands
+
     def _download_payload(self, bbox: str, cache_path: Path) -> None:
         tmp_path = cache_path.with_suffix(".tmp")
         if tmp_path.exists():
@@ -427,47 +628,72 @@ class OvertureBuildingsProvider(ProviderBase):
         self._throttle()
         start = time.time()
         label = cache_path.name
-        cmd = [
-            sys.executable,
-            "-m",
-            "overturemaps.cli",
-            "download",
-            f"--bbox={bbox}",
-            "-f",
-            "geojson",
-            "--type",
-            self._dataset_type,
-            "-o",
-            str(tmp_path),
-        ]
-        if self._limit:
-            cmd.extend(["--limit", str(self._limit)])
-        LOGGER.debug("Running overturemaps CLI: %s", " ".join(cmd))
-        try:
-            subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=max(self._timeout, 0) or None,
+        commands = self._build_cli_command_variants(bbox, tmp_path)
+        timeout = max(self._timeout, 0) or None
+        last_error: Optional[Tuple[subprocess.CalledProcessError, str]] = None
+        attempt_count = len(commands)
+        for attempt, cmd in enumerate(commands, start=1):
+            LOGGER.debug(
+                "Running overturemaps CLI (attempt %d/%d): %s",
+                attempt,
+                attempt_count,
+                " ".join(cmd),
             )
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.strip() if exc.stderr else ""
-            stdout = exc.stdout.strip() if exc.stdout else ""
-            message = "; ".join(part for part in [stdout, stderr] if part)
+            try:
+                subprocess.run(
+                    cmd,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.strip() if exc.stderr else ""
+                stdout = exc.stdout.strip() if exc.stdout else ""
+                message = "; ".join(part for part in [stdout, stderr] if part)
+                last_error = (exc, message)
+                fallbackable = (
+                    exc.returncode == 2
+                    or "usage" in message.lower()
+                    or "no such option" in message.lower()
+                    or "missing option" in message.lower()
+                    or "invalid value" in message.lower()
+                )
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                if fallbackable and attempt < attempt_count:
+                    LOGGER.debug(
+                        "Retrying overturemaps CLI with alternate arguments after failure: %s",
+                        message or exc.returncode,
+                    )
+                    continue
+                raise RuntimeError(
+                    f"overturemaps CLI failed for bbox {bbox} (exit {exc.returncode}): {message}"
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
+                raise RuntimeError(
+                    f"overturemaps CLI timed out for bbox {bbox} after {self._timeout} seconds"
+                ) from exc
+            else:
+                duration = time.time() - start
+                LOGGER.debug(
+                    "Downloaded Overture data for %s in %.2f seconds via overturemaps CLI", label, duration
+                )
+                tmp_path.replace(cache_path)
+                return
+
+        if last_error is not None:
+            exc, message = last_error
             raise RuntimeError(
                 f"overturemaps CLI failed for bbox {bbox} (exit {exc.returncode}): {message}"
             ) from exc
-        except subprocess.TimeoutExpired as exc:
-            raise RuntimeError(
-                f"overturemaps CLI timed out for bbox {bbox} after {self._timeout} seconds"
-            ) from exc
-        else:
-            duration = time.time() - start
-            LOGGER.debug(
-                "Downloaded Overture data for %s in %.2f seconds via overturemaps CLI", label, duration
-            )
-            tmp_path.replace(cache_path)
+
+        raise RuntimeError(
+            f"overturemaps CLI failed for bbox {bbox}: unable to determine compatible arguments"
+        )
 
     def _load_payload(
         self,
