@@ -313,6 +313,7 @@ class OvertureBuildingsProvider(ProviderBase):
         base_url: str,
         theme: str,
         search_radius_m: float,
+        cache_quantization_m: float,
         match_distance_m: float,
         sleep_between_requests: float,
         limit: int,
@@ -334,6 +335,7 @@ class OvertureBuildingsProvider(ProviderBase):
         self._endpoint = base_url.rstrip("/") if base_url else "https://api.overturemaps.org/"
         self._theme = theme
         self._search_radius_m = search_radius_m
+        self._cache_quantization_m = max(0.0, cache_quantization_m)
         self._match_distance_m = match_distance_m
         self._sleep_between_requests = sleep_between_requests
         self._limit = max(1, limit)
@@ -346,6 +348,31 @@ class OvertureBuildingsProvider(ProviderBase):
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         self._dataset_type = self._derive_dataset_type(theme)
         self._cli_options = self._detect_cli_options()
+        self._prefetch_bbox: Optional[Tuple[float, float, float, float]] = None
+        self._prefetch_bbox_key: Optional[str] = None
+        self._prefetch_bbox_value: Optional[str] = None
+
+    def configure_prefetch_region(
+        self,
+        center_lat: float,
+        center_lon: float,
+        radius_m: Optional[float],
+    ) -> None:
+        """Configure a global download bounding box shared across lookups."""
+
+        if radius_m is None or radius_m <= 0:
+            self._prefetch_bbox = None
+            self._prefetch_bbox_key = None
+            self._prefetch_bbox_value = None
+            return
+
+        south, west, north, east = compute_bbox(center_lat, center_lon, radius_m)
+        west_south_east_north = (west, south, east, north)
+        self._prefetch_bbox = west_south_east_north
+        self._prefetch_bbox_key = f"{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}"
+        self._prefetch_bbox_value = f"{west},{south},{east},{north}"
+        if radius_m > self._search_radius_m:
+            self._search_radius_m = radius_m
 
     def _detect_cli_options(self) -> OvertureCliOptions:
         """Inspect the overturemaps CLI to pick compatible flag names."""
@@ -437,14 +464,31 @@ class OvertureBuildingsProvider(ProviderBase):
         return normalized
 
     def _bbox_from_radius(self, lat: float, lon: float) -> Tuple[float, float, float, float]:
+        if self._prefetch_bbox is not None:
+            return self._prefetch_bbox
         if self._search_radius_m <= 0:
             return (lon, lat, lon, lat)
+
+        quantized_lat = lat
+        quantized_lon = lon
+        if self._cache_quantization_m > 0:
+            lat_step = self._cache_quantization_m / 111320.0
+            lon_step = self._cache_quantization_m / max(
+                1e-6, 111320.0 * math.cos(math.radians(lat or 0.0))
+            )
+            if lat_step > 0:
+                quantized_lat = round(lat / lat_step) * lat_step
+            if lon_step > 0:
+                quantized_lon = round(lon / lon_step) * lon_step
+
         lat_buffer = self._search_radius_m / 111320.0
-        lon_buffer = self._search_radius_m / max(1e-6, 111320.0 * math.cos(math.radians(lat)))
-        south = lat - lat_buffer
-        north = lat + lat_buffer
-        west = lon - lon_buffer
-        east = lon + lon_buffer
+        lon_buffer = self._search_radius_m / max(
+            1e-6, 111320.0 * math.cos(math.radians(quantized_lat or 0.0))
+        )
+        south = quantized_lat - lat_buffer
+        north = quantized_lat + lat_buffer
+        west = quantized_lon - lon_buffer
+        east = quantized_lon + lon_buffer
         return west, south, east, north
 
     def _extract_name(self, properties: Dict[str, Any]) -> Optional[str]:
@@ -732,8 +776,12 @@ class OvertureBuildingsProvider(ProviderBase):
 
     def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
         west, south, east, north = self._bbox_from_radius(lat, lon)
-        bbox_key = f"{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}"
-        bbox_value = f"{west},{south},{east},{north}"
+        if self._prefetch_bbox_key is not None and self._prefetch_bbox_value is not None:
+            bbox_key = self._prefetch_bbox_key
+            bbox_value = self._prefetch_bbox_value
+        else:
+            bbox_key = f"{west:.6f}_{south:.6f}_{east:.6f}_{north:.6f}"
+            bbox_value = f"{west},{south},{east},{north}"
 
         cache_path = self._cache_path(bbox_key)
         payload = self._load_payload(lat, lon, bbox_value, cache_path)
@@ -1328,24 +1376,28 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                 )
             )
         elif name == "overture":
-            provider_instances.append(
-                OvertureBuildingsProvider(
-                    base_url=args.overture_endpoint,
-                    theme=args.overture_theme,
-                    search_radius_m=args.provider_radius,
-                    match_distance_m=args.match_distance,
-                    sleep_between_requests=args.request_sleep,
-                    limit=args.overture_limit,
-                    include_fields=args.overture_include_fields,
-                    category_fields=args.overture_category_fields,
-                    name_fields=args.overture_name_fields,
-                    timeout=args.overture_timeout,
-                    cache_dir=args.overture_cache_dir,
-                    auth_token=args.overture_auth_token,
-                    proxy=args.overture_proxy,
-                    cache_only=args.overture_cache_only,
-                )
+            overture_provider = OvertureBuildingsProvider(
+                base_url=args.overture_endpoint,
+                theme=args.overture_theme,
+                search_radius_m=args.provider_radius,
+                cache_quantization_m=args.provider_cache_quantization,
+                match_distance_m=args.match_distance,
+                sleep_between_requests=args.request_sleep,
+                limit=args.overture_limit,
+                include_fields=args.overture_include_fields,
+                category_fields=args.overture_category_fields,
+                name_fields=args.overture_name_fields,
+                timeout=args.overture_timeout,
+                cache_dir=args.overture_cache_dir,
+                auth_token=args.overture_auth_token,
+                proxy=args.overture_proxy,
+                cache_only=args.overture_cache_only,
             )
+            prefetch_radius = args.overture_prefetch_radius
+            if prefetch_radius is None:
+                prefetch_radius = args.radius
+            overture_provider.configure_prefetch_region(args.lat, args.lon, prefetch_radius)
+            provider_instances.append(overture_provider)
         elif name == "local_geojson":
             if not args.local_geojson:
                 raise ValueError("--local-geojson must be provided when enabling local_geojson provider")
@@ -1822,10 +1874,28 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--overture-prefetch-radius",
+        type=float,
+        default=None,
+        help=(
+            "Radius in meters for a shared Overture download bounding box. "
+            "Defaults to the dataset radius when not provided."
+        ),
+    )
+    parser.add_argument(
         "--provider-radius",
         type=float,
         default=50.0,
         help="Search radius in meters for provider lookups",
+    )
+    parser.add_argument(
+        "--provider-cache-quantization",
+        type=float,
+        default=25.0,
+        help=(
+            "Quantization in meters applied to provider lookup coordinates before caching. "
+            "Larger values increase cache reuse and reduce repeated downloads (default: 25.0)."
+        ),
     )
     parser.add_argument(
         "--match-distance",

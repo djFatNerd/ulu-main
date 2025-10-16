@@ -21,9 +21,11 @@ OUTPUT_DIR="${5:-./semantic_dataset_overture}"
 
 MATCH_DISTANCE="${MATCH_DISTANCE:-35.0}"
 PROVIDER_RADIUS="${PROVIDER_RADIUS:-50.0}"
+PROVIDER_CACHE_QUANTIZATION="${PROVIDER_CACHE_QUANTIZATION:-25.0}"
 REQUEST_SLEEP="${REQUEST_SLEEP:-0.2}"
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 CACHE_DIR="${OVERTURE_CACHE_DIR:-}"
+OVERTURE_PREFETCH_RADIUS="${OVERTURE_PREFETCH_RADIUS:-}"
 
 CMD=(
   python tools/multisource/generate_semantic_dataset_enriched.py
@@ -32,6 +34,7 @@ CMD=(
   --output "$OUTPUT_DIR"
   --match-distance "$MATCH_DISTANCE"
   --provider-radius "$PROVIDER_RADIUS"
+  --provider-cache-quantization "$PROVIDER_CACHE_QUANTIZATION"
   --request-sleep "$REQUEST_SLEEP"
   --log-level "$LOG_LEVEL"
   --provider overture
@@ -56,6 +59,10 @@ fi
 
 if [[ -n "${OVERTURE_LIMIT:-}" ]]; then
   CMD+=(--overture-limit "$OVERTURE_LIMIT")
+fi
+
+if [[ -n "$OVERTURE_PREFETCH_RADIUS" ]]; then
+  CMD+=(--overture-prefetch-radius "$OVERTURE_PREFETCH_RADIUS")
 fi
 
 if [[ -n "${OVERTURE_INCLUDE_FIELDS:-}" ]]; then
