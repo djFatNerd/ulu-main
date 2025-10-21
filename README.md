@@ -107,6 +107,23 @@ each section.
 | 6. Overture + Google | `run_overture_google.sh` | Overture downloads + Google Places (no OSM labels) | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
 | 7. OSM + Overture + Google | `run_osm_overture_google.sh` | OSM labels merged with Overture and Google Places | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
 
+### Comprehensive regional bundle (OSM + Overture + Google)
+
+Use the Python entrypoint `tools/multisource/generate_region_urban_bundle.py` when you need every available source combined into a planning-ready package. The script runs the full enrichment pipeline, then derives two additional artifacts:
+
+1. `buildings_enriched.json` – a building-by-building catalog with centroid, size, OSM tags, merged provider labels, ratings, opening hours, and the raw provider payload for auditing.
+2. `metadata.json` – extended region metadata including footprint statistics, dominant categories, data source coverage, and the paths to all generated outputs.
+
+The default output directory is `data/urban_region_bundle`, but you can override it with `--output-dir`. Example invocation:
+
+```bash
+export GOOGLE_MAPS_API_KEY="your-key-from-google"
+python tools/multisource/generate_region_urban_bundle.py 40.7580 -73.9855 1000 \
+  --output-dir data/midtown_bundle
+```
+
+The Google key is only required at execution time. You can keep it outside of source control by setting `GOOGLE_MAPS_API_KEY` in your shell, an `.env` file that you source locally, or a secret manager. If you prefer to pass the key explicitly, use `--google-api-key` on the command line – the value is consumed at runtime and never written to disk. Overture responses are cached under `--overture-cache-dir` (default `data/overture_cache`) so repeated runs reuse downloads whenever possible. Use `--overture-cache-only` to force offline operation when the cache is already populated.
+
 ### Combination 1 – OSM only
 
 ```
