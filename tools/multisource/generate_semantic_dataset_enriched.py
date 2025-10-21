@@ -17,7 +17,14 @@ from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from requests import exceptions as requests_exceptions
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+try:
+    import googlemaps  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    googlemaps = None  # type: ignore
 
 from shapely.geometry import Point, box, shape
 from shapely.strtree import STRtree
@@ -47,6 +54,105 @@ from tools.osm import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+DEFAULT_CONNECT_TIMEOUT = 10
+DEFAULT_READ_TIMEOUT = 20
+SAFE_DETAIL_FIELDS = [
+    "name",
+    "type",
+    "types",
+    "rating",
+    "user_ratings_total",
+    "opening_hours",
+    "website",
+    "formatted_phone_number",
+    "business_status",
+]
+
+
+def make_hardened_session() -> requests.Session:
+    session = requests.Session()
+    session.trust_env = False
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.8,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=50, pool_maxsize=50)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+def make_gmaps_client(api_key: str, *, read_timeout: Optional[float] = None) -> "googlemaps.Client":
+    if googlemaps is None:  # pragma: no cover - dependency missing
+        raise RuntimeError(
+            "googlemaps package is required for Google provider. Install it via requirements.txt."
+        )
+    session = make_hardened_session()
+    timeout = (
+        DEFAULT_CONNECT_TIMEOUT,
+        read_timeout if read_timeout and read_timeout > 0 else DEFAULT_READ_TIMEOUT,
+    )
+    return googlemaps.Client(
+        key=api_key,
+        requests_session=session,
+        requests_kwargs={"timeout": timeout},
+    )
+
+
+def safe_places_nearby(
+    gmaps: "googlemaps.Client",
+    *,
+    location,
+    radius,
+    type_=None,
+    keyword=None,
+    max_attempts: int = 2,
+):
+    for attempt in range(max_attempts):
+        try:
+            return gmaps.places_nearby(
+                location=location,
+                radius=radius,
+                type=type_,
+                keyword=keyword,
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning(
+                "places_nearby error (attempt %s/%s): %s",
+                attempt + 1,
+                max_attempts,
+                exc,
+            )
+            time.sleep(1.2 * (attempt + 1))
+    return None
+
+
+def safe_place_details(
+    gmaps: "googlemaps.Client",
+    place_id: str,
+    *,
+    fields: Sequence[str] = SAFE_DETAIL_FIELDS,
+    max_attempts: int = 2,
+):
+    for attempt in range(max_attempts):
+        try:
+            return gmaps.place(place_id=place_id, fields=fields)
+        except Exception as exc:  # pragma: no cover - defensive
+            logging.warning(
+                "place details error (attempt %s/%s) for %s: %s",
+                attempt + 1,
+                max_attempts,
+                place_id,
+                exc,
+            )
+            time.sleep(1.2 * (attempt + 1))
+    return None
 
 
 @dataclass
@@ -165,13 +271,15 @@ class GooglePlacesProvider(ProviderBase):
         match_distance_m: float,
         sleep_between_requests: float,
         timeout: Optional[float] = None,
+        enabled: bool = True,
+        max_google_calls: Optional[int] = None,
+        place_types: Optional[Sequence[str]] = None,
+        keyword: Optional[str] = None,
     ) -> None:
-        try:
-            import googlemaps  # type: ignore
-        except ImportError as exc:  # pragma: no cover - executed only when dependency missing
+        if googlemaps is None:  # pragma: no cover - dependency missing
             raise RuntimeError(
                 "googlemaps package is required for Google provider. Install it via requirements.txt."
-            ) from exc
+            )
 
         timeout_value: Optional[float]
         if timeout is None or timeout <= 0:
@@ -179,38 +287,77 @@ class GooglePlacesProvider(ProviderBase):
         else:
             timeout_value = timeout
 
-        self._client = googlemaps.Client(key=api_key, timeout=timeout_value)
+        self._client = make_gmaps_client(
+            api_key,
+            read_timeout=timeout_value,
+        )
         self._search_radius_m = search_radius_m
         self._match_distance_m = match_distance_m
         self._sleep_between_requests = sleep_between_requests
+        self._enabled = enabled
+        self._max_google_calls = max_google_calls if max_google_calls and max_google_calls > 0 else None
+        self._types = [value.strip() for value in (place_types or []) if value and value.strip()]
+        self._keyword = keyword
+        self._google_calls = 0
+        self._log_disabled_once = False
+        self._log_limit_once = False
         self._timeout = timeout_value
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
             time.sleep(self._sleep_between_requests)
 
-    def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
-        from googlemaps import exceptions as g_exceptions  # type: ignore
+    def _increment_calls(self) -> None:
+        self._google_calls += 1
 
+    def _can_call(self) -> bool:
+        if not self._enabled:
+            if not self._log_disabled_once:
+                LOGGER.info("Skipping Google enrichment because it is disabled via configuration.")
+                self._log_disabled_once = True
+            return False
+        if self._max_google_calls is not None and self._google_calls >= self._max_google_calls:
+            if not self._log_limit_once:
+                LOGGER.info(
+                    "Skipping Google enrichment after reaching max Google calls limit (%s).",
+                    self._max_google_calls,
+                )
+                self._log_limit_once = True
+            return False
+        return True
+
+    def should_enrich(self, feature: Dict[str, Any]) -> bool:
+        del feature  # currently unused hook for future heuristics
+        return True
+
+    def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
+        if not self.should_enrich(feature):
+            return None
+
+        base_location = (lat, lon)
         params = {
-            "location": (lat, lon),
+            "location": base_location,
             "radius": self._search_radius_m,
         }
-        try:
+
+        response: Optional[Dict[str, Any]] = None
+        types_to_try = self._types or [None]
+        for place_type in types_to_try:
+            if not self._can_call():
+                return None
             self._throttle()
-            response = self._client.places_nearby(**params)
-        except g_exceptions.ApiError as exc:
-            LOGGER.warning("Google Places API error for %s: %s", feature.get("id"), exc)
-            return None
-        except requests_exceptions.Timeout:
-            LOGGER.warning(
-                "Google Places API request for %s timed out after %s seconds",
-                feature.get("id"),
-                self._timeout or "default",
+            response = safe_places_nearby(
+                self._client,
+                location=params["location"],
+                radius=params["radius"],
+                type_=place_type,
+                keyword=self._keyword,
             )
-            return None
-        except Exception as exc:  # pragma: no cover - defensive
-            LOGGER.warning("Unexpected Google Places error for %s: %s", feature.get("id"), exc)
+            self._increment_calls()
+            if response and response.get("results"):
+                break
+
+        if not response:
             return None
 
         candidates = response.get("results", [])
@@ -238,33 +385,11 @@ class GooglePlacesProvider(ProviderBase):
 
         details: Dict[str, Any] = {}
         place_id = best_candidate.get("place_id")
-        if place_id:
-            try:
-                self._throttle()
-                details_resp = self._client.place(
-                    place_id,
-                    fields=[
-                        "name",
-                        "type",
-                        "rating",
-                        "user_ratings_total",
-                        "opening_hours",
-                        "website",
-                        "formatted_phone_number",
-                        "business_status",
-                    ],
-                )
-                details = details_resp.get("result", {}) if details_resp else {}
-            except g_exceptions.ApiError as exc:
-                LOGGER.warning("Google Place details error for %s: %s", place_id, exc)
-            except requests_exceptions.Timeout:
-                LOGGER.warning(
-                    "Google Place details request for %s timed out after %s seconds",
-                    place_id,
-                    self._timeout or "default",
-                )
-            except Exception as exc:  # pragma: no cover - defensive
-                LOGGER.warning("Unexpected Google Place details error for %s: %s", place_id, exc)
+        if place_id and self._can_call():
+            self._throttle()
+            details_resp = safe_place_details(self._client, place_id)
+            self._increment_calls()
+            details = details_resp.get("result", {}) if details_resp else {}
 
         details_types: Any = details.get("types")
         if not details_types:
@@ -1342,6 +1467,7 @@ def configure_free_tier(args: argparse.Namespace) -> None:
 
     # Ensure we do not rely on the Google shortcut defaults.
     args.provider = "osm"
+    args.no_google = True
 
 
 def _append_once(items: List[str], value: str) -> None:
@@ -1406,6 +1532,9 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     match_distance_m=args.match_distance,
                     sleep_between_requests=args.request_sleep,
                     timeout=args.google_timeout,
+                    enabled=not args.no_google,
+                    max_google_calls=args.max_google_calls,
+                    place_types=args.google_types,
                 )
             )
         elif name == "overture":
@@ -1832,6 +1961,23 @@ def parse_args() -> argparse.Namespace:
         "--google-api-key",
         default=None,
         help="Google Maps Platform API key for Google provider modes",
+    )
+    parser.add_argument(
+        "--no-google",
+        action="store_true",
+        help="Disable Google Places enrichment even when the provider is enabled",
+    )
+    parser.add_argument(
+        "--max-google-calls",
+        type=int,
+        default=None,
+        help="Maximum number of Google Places API calls before skipping further lookups",
+    )
+    parser.add_argument(
+        "--google-types",
+        nargs="+",
+        default=None,
+        help="Optional list of Google Places types to restrict nearby searches",
     )
     parser.add_argument(
         "--google-timeout",
