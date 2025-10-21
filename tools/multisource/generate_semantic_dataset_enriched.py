@@ -61,6 +61,7 @@ DEFAULT_CONNECT_TIMEOUT = 10
 # broader place type information is available through "type" and nearby search
 # results.
 DEFAULT_READ_TIMEOUT = 20
+DEFAULT_REQUEST_TIMEOUT = (DEFAULT_CONNECT_TIMEOUT, DEFAULT_READ_TIMEOUT)
 SAFE_DETAIL_FIELDS = [
     "name",
     "type",
@@ -96,10 +97,9 @@ def make_gmaps_client(api_key: str, *, read_timeout: Optional[float] = None) -> 
             "googlemaps package is required for Google provider. Install it via requirements.txt."
         )
     session = make_hardened_session()
-    timeout = (
-        DEFAULT_CONNECT_TIMEOUT,
-        read_timeout if read_timeout and read_timeout > 0 else DEFAULT_READ_TIMEOUT,
-    )
+    timeout = DEFAULT_REQUEST_TIMEOUT
+    if read_timeout and read_timeout > 0:
+        timeout = (DEFAULT_CONNECT_TIMEOUT, read_timeout)
     return googlemaps.Client(
         key=api_key,
         requests_session=session,
@@ -125,7 +125,7 @@ def safe_places_nearby(
                 keyword=keyword,
             )
         except Exception as exc:  # pragma: no cover - defensive
-            logging.warning(
+            LOGGER.warning(
                 "places_nearby error (attempt %s/%s): %s",
                 attempt + 1,
                 max_attempts,
@@ -146,7 +146,7 @@ def safe_place_details(
         try:
             return gmaps.place(place_id=place_id, fields=fields)
         except Exception as exc:  # pragma: no cover - defensive
-            logging.warning(
+            LOGGER.warning(
                 "place details error (attempt %s/%s) for %s: %s",
                 attempt + 1,
                 max_attempts,
@@ -392,6 +392,12 @@ class GooglePlacesProvider(ProviderBase):
                 break
 
         if not response:
+            LOGGER.warning(
+                "Nearby search failed or returned no data at %.6f, %.6f (type=%s); skipping.",
+                lat,
+                lon,
+                place_type or "*",
+            )
             return None
 
         candidates = response.get("results", [])
@@ -426,7 +432,16 @@ class GooglePlacesProvider(ProviderBase):
                 self._throttle()
                 details_resp = safe_place_details(self._client, place_id)
                 self._increment_calls()
-                details = details_resp.get("result", {}) if details_resp else {}
+                if not details_resp:
+                    LOGGER.warning(
+                        "Place details lookup failed for %s near %.6f, %.6f; continuing without details.",
+                        place_id,
+                        lat,
+                        lon,
+                    )
+                    details = {}
+                else:
+                    details = details_resp.get("result", {})
                 self._details_cache[place_id] = details
 
         details_types: Any = details.get("types")
