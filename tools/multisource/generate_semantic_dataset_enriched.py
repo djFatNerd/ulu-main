@@ -57,11 +57,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_CONNECT_TIMEOUT = 10
+# The Places Details API does not accept "types" in the fields list; the
+# broader place type information is available through "type" and nearby search
+# results.
 DEFAULT_READ_TIMEOUT = 20
 SAFE_DETAIL_FIELDS = [
     "name",
     "type",
-    "types",
     "rating",
     "user_ratings_total",
     "opening_hours",
@@ -270,6 +272,7 @@ class GooglePlacesProvider(ProviderBase):
         search_radius_m: float,
         match_distance_m: float,
         sleep_between_requests: float,
+        cache_quantization_m: float,
         timeout: Optional[float] = None,
         enabled: bool = True,
         max_google_calls: Optional[int] = None,
@@ -302,10 +305,35 @@ class GooglePlacesProvider(ProviderBase):
         self._log_disabled_once = False
         self._log_limit_once = False
         self._timeout = timeout_value
+        self._cache_quantization_m = max(0.0, cache_quantization_m)
+        self._nearby_cache: Dict[Tuple[str, float, float, str], Optional[Dict[str, Any]]] = {}
+        self._details_cache: Dict[str, Dict[str, Any]] = {}
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
             time.sleep(self._sleep_between_requests)
+
+    def _quantize_location(self, lat: float, lon: float) -> Tuple[float, float]:
+        if self._cache_quantization_m <= 0:
+            return lat, lon
+
+        lat_step = self._cache_quantization_m / 111320.0 if self._cache_quantization_m > 0 else 0.0
+        lon_denominator = max(1e-6, 111320.0 * math.cos(math.radians(lat or 0.0)))
+        lon_step = self._cache_quantization_m / lon_denominator if self._cache_quantization_m > 0 else 0.0
+
+        quantized_lat = lat if lat_step <= 0 else round(lat / lat_step) * lat_step
+        quantized_lon = lon if lon_step <= 0 else round(lon / lon_step) * lon_step
+
+        # Round to reduce floating point drift in cache keys.
+        return round(quantized_lat, 7), round(quantized_lon, 7)
+
+    def _nearby_cache_key(self, lat: float, lon: float, place_type: Optional[str]) -> Optional[Tuple[str, float, float, str]]:
+        if self._cache_quantization_m <= 0:
+            return None
+        quant_lat, quant_lon = self._quantize_location(lat, lon)
+        type_key = (place_type or "").strip().lower()
+        keyword_key = (self._keyword or "").strip().lower()
+        return (type_key, quant_lat, quant_lon, keyword_key)
 
     def _increment_calls(self) -> None:
         self._google_calls += 1
@@ -343,17 +371,23 @@ class GooglePlacesProvider(ProviderBase):
         response: Optional[Dict[str, Any]] = None
         types_to_try = self._types or [None]
         for place_type in types_to_try:
-            if not self._can_call():
-                return None
-            self._throttle()
-            response = safe_places_nearby(
-                self._client,
-                location=params["location"],
-                radius=params["radius"],
-                type_=place_type,
-                keyword=self._keyword,
-            )
-            self._increment_calls()
+            cache_key = self._nearby_cache_key(lat, lon, place_type)
+            if cache_key is not None and cache_key in self._nearby_cache:
+                response = self._nearby_cache[cache_key]
+            else:
+                if not self._can_call():
+                    return None
+                self._throttle()
+                response = safe_places_nearby(
+                    self._client,
+                    location=params["location"],
+                    radius=params["radius"],
+                    type_=place_type,
+                    keyword=self._keyword,
+                )
+                self._increment_calls()
+                if cache_key is not None:
+                    self._nearby_cache[cache_key] = response
             if response and response.get("results"):
                 break
 
@@ -385,11 +419,15 @@ class GooglePlacesProvider(ProviderBase):
 
         details: Dict[str, Any] = {}
         place_id = best_candidate.get("place_id")
-        if place_id and self._can_call():
-            self._throttle()
-            details_resp = safe_place_details(self._client, place_id)
-            self._increment_calls()
-            details = details_resp.get("result", {}) if details_resp else {}
+        if place_id:
+            if place_id in self._details_cache:
+                details = self._details_cache[place_id]
+            elif self._can_call():
+                self._throttle()
+                details_resp = safe_place_details(self._client, place_id)
+                self._increment_calls()
+                details = details_resp.get("result", {}) if details_resp else {}
+                self._details_cache[place_id] = details
 
         details_types: Any = details.get("types")
         if not details_types:
@@ -1531,6 +1569,7 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     search_radius_m=args.provider_radius,
                     match_distance_m=args.match_distance,
                     sleep_between_requests=args.request_sleep,
+                    cache_quantization_m=args.provider_cache_quantization,
                     timeout=args.google_timeout,
                     enabled=not args.no_google,
                     max_google_calls=args.max_google_calls,

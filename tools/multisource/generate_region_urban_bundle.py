@@ -195,6 +195,7 @@ def _build_provider(
                 search_radius_m=provider_radius,
                 match_distance_m=match_distance,
                 sleep_between_requests=request_sleep,
+                cache_quantization_m=25.0,
             )
         )
     else:
