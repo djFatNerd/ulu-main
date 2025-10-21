@@ -57,11 +57,13 @@ LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_CONNECT_TIMEOUT = 10
+# The Places Details API does not accept "types" in the fields list; the
+# broader place type information is available through "type" and nearby search
+# results.
 DEFAULT_READ_TIMEOUT = 20
 SAFE_DETAIL_FIELDS = [
     "name",
     "type",
-    "types",
     "rating",
     "user_ratings_total",
     "opening_hours",
