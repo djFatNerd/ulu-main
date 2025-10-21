@@ -228,7 +228,7 @@ class GooglePlacesProvider(ProviderBase):
                     place_id,
                     fields=[
                         "name",
-                        "types",
+                        "type",
                         "rating",
                         "user_ratings_total",
                         "opening_hours",
@@ -243,11 +243,19 @@ class GooglePlacesProvider(ProviderBase):
             except Exception as exc:  # pragma: no cover - defensive
                 LOGGER.warning("Unexpected Google Place details error for %s: %s", place_id, exc)
 
-        categories: Sequence[str] = (
-            details.get("types")
+        details_types: Any = details.get("types")
+        if not details_types:
+            single_type = details.get("type")
+            if single_type:
+                details_types = [single_type]
+
+        candidate_types: Any = (
+            details_types
             or best_candidate.get("types")
+            or best_candidate.get("type")
             or []
         )
+        categories: Sequence[str] = _normalize_tokens(candidate_types)
         opening_hours: Optional[Sequence[str]] = None
         opening = details.get("opening_hours") or best_candidate.get("opening_hours")
         if isinstance(opening, dict):
@@ -351,6 +359,7 @@ class OvertureBuildingsProvider(ProviderBase):
         self._prefetch_bbox: Optional[Tuple[float, float, float, float]] = None
         self._prefetch_bbox_key: Optional[str] = None
         self._prefetch_bbox_value: Optional[str] = None
+        self._session: Optional[Any] = None
 
     def configure_prefetch_region(
         self,
