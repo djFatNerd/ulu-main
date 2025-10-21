@@ -17,6 +17,8 @@ from hashlib import md5
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from requests import exceptions as requests_exceptions
+
 from shapely.geometry import Point, box, shape
 from shapely.strtree import STRtree
 
@@ -162,6 +164,7 @@ class GooglePlacesProvider(ProviderBase):
         search_radius_m: float,
         match_distance_m: float,
         sleep_between_requests: float,
+        timeout: Optional[float] = None,
     ) -> None:
         try:
             import googlemaps  # type: ignore
@@ -170,10 +173,17 @@ class GooglePlacesProvider(ProviderBase):
                 "googlemaps package is required for Google provider. Install it via requirements.txt."
             ) from exc
 
-        self._client = googlemaps.Client(key=api_key)
+        timeout_value: Optional[float]
+        if timeout is None or timeout <= 0:
+            timeout_value = None
+        else:
+            timeout_value = timeout
+
+        self._client = googlemaps.Client(key=api_key, timeout=timeout_value)
         self._search_radius_m = search_radius_m
         self._match_distance_m = match_distance_m
         self._sleep_between_requests = sleep_between_requests
+        self._timeout = timeout_value
 
     def _throttle(self) -> None:
         if self._sleep_between_requests > 0:
@@ -191,6 +201,13 @@ class GooglePlacesProvider(ProviderBase):
             response = self._client.places_nearby(**params)
         except g_exceptions.ApiError as exc:
             LOGGER.warning("Google Places API error for %s: %s", feature.get("id"), exc)
+            return None
+        except requests_exceptions.Timeout:
+            LOGGER.warning(
+                "Google Places API request for %s timed out after %s seconds",
+                feature.get("id"),
+                self._timeout or "default",
+            )
             return None
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.warning("Unexpected Google Places error for %s: %s", feature.get("id"), exc)
@@ -240,6 +257,12 @@ class GooglePlacesProvider(ProviderBase):
                 details = details_resp.get("result", {}) if details_resp else {}
             except g_exceptions.ApiError as exc:
                 LOGGER.warning("Google Place details error for %s: %s", place_id, exc)
+            except requests_exceptions.Timeout:
+                LOGGER.warning(
+                    "Google Place details request for %s timed out after %s seconds",
+                    place_id,
+                    self._timeout or "default",
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 LOGGER.warning("Unexpected Google Place details error for %s: %s", place_id, exc)
 
@@ -1382,6 +1405,7 @@ def select_provider(args: argparse.Namespace) -> Tuple[ProviderBase, bool, str]:
                     search_radius_m=args.provider_radius,
                     match_distance_m=args.match_distance,
                     sleep_between_requests=args.request_sleep,
+                    timeout=args.google_timeout,
                 )
             )
         elif name == "overture":
@@ -1808,6 +1832,12 @@ def parse_args() -> argparse.Namespace:
         "--google-api-key",
         default=None,
         help="Google Maps Platform API key for Google provider modes",
+    )
+    parser.add_argument(
+        "--google-timeout",
+        type=float,
+        default=10.0,
+        help="Timeout in seconds for Google Places API requests (default: 10.0)",
     )
     parser.add_argument(
         "--overture-endpoint",
