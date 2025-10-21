@@ -1714,11 +1714,23 @@ def enrich_features(
     provider: ProviderBase,
     use_osm_labels: bool,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    feature_list = list(features)
+    total_features = len(feature_list)
+    if total_features == 0:
+        return [], {
+            "provider_name": provider.name,
+            "provider_requests": 0,
+            "provider_matches": 0,
+            "provider_match_rate": 0.0,
+        }
+
     enriched: List[Dict[str, Any]] = []
     matched = 0
     provider_requests = 0
+    start_time = time.time()
+    log_interval = max(1, min(500, total_features // 20 or 1))
 
-    for feature in features:
+    for index, feature in enumerate(feature_list, start=1):
         props = dict(feature.get("properties", {}))
         if use_osm_labels:
             osm_for_combination = props
@@ -1840,11 +1852,23 @@ def enrich_features(
         feature["properties"] = props
         enriched.append(feature)
 
+        if index % log_interval == 0 or index == total_features:
+            elapsed = time.time() - start_time
+            rate = provider_requests / elapsed if elapsed > 0 else 0.0
+            LOGGER.info(
+                "Enrichment progress: %d/%d features processed (matches=%d, provider_requests=%d, %.2f req/s)",
+                index,
+                total_features,
+                matched,
+                provider_requests,
+                rate,
+            )
+
     summary = {
         "provider_name": provider.name,
         "provider_requests": provider_requests,
         "provider_matches": matched,
-        "provider_match_rate": (matched / len(enriched)) if enriched else 0.0,
+        "provider_match_rate": (matched / total_features) if total_features else 0.0,
     }
     return enriched, summary
 
