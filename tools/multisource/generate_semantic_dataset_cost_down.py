@@ -28,9 +28,18 @@ from tools.osm import (
 )
 from tools.osm import generate_semantic_dataset as osm_generate
 
+from tools.multisource.generate_semantic_dataset_enriched import (
+    OvertureBuildingsProvider,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 ALLOWED_PROVIDER_FIELDS = {"place_id", "name", "types", "vicinity"}
+
+DEFAULT_PROVIDER_RADIUS = 50.0
+DEFAULT_PROVIDER_CACHE_QUANTIZATION = 25.0
+DEFAULT_MATCH_DISTANCE = 35.0
+DEFAULT_REQUEST_SLEEP = 0.2
 
 
 @dataclass
@@ -230,6 +239,46 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unit-price-details-min", type=float, default=20.0)
     parser.add_argument("--google-cache-dir", type=Path, default=Path("~/.cache/ulu/google").expanduser())
     parser.add_argument("--place-id-property", default="provider_place_id", help="Feature property to use for Google place IDs")
+    parser.add_argument("--provider-radius", type=float, default=DEFAULT_PROVIDER_RADIUS)
+    parser.add_argument("--provider-cache-quantization", type=float, default=DEFAULT_PROVIDER_CACHE_QUANTIZATION)
+    parser.add_argument("--match-distance", type=float, default=DEFAULT_MATCH_DISTANCE)
+    parser.add_argument("--request-sleep", type=float, default=DEFAULT_REQUEST_SLEEP)
+    parser.add_argument("--overture-endpoint", default="https://api.overturemaps.org/places/v1/places")
+    parser.add_argument("--overture-theme", default="buildings")
+    parser.add_argument("--overture-limit", type=int, default=25)
+    parser.add_argument(
+        "--overture-include-fields",
+        nargs="*",
+        default=["names", "categories", "addresses"],
+    )
+    parser.add_argument(
+        "--overture-category-fields",
+        nargs="*",
+        default=["categories", "category", "function", "building.use", "building.function"],
+    )
+    parser.add_argument(
+        "--overture-name-fields",
+        nargs="*",
+        default=["name", "names.primary", "display.name", "displayName.text"],
+    )
+    parser.add_argument("--overture-timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--overture-cache-dir",
+        type=Path,
+        default=Path("data/overture_cache"),
+        help="Directory used to cache downloaded Overture payloads",
+    )
+    parser.add_argument(
+        "--overture-cache-only",
+        action="store_true",
+        help="Skip Overture network calls and rely solely on cached responses",
+    )
+    parser.add_argument(
+        "--overture-prefetch-radius",
+        type=float,
+        default=None,
+        help="Radius in meters for shared Overture downloads (defaults to dataset radius)",
+    )
     parser.add_argument("--log-level", default="INFO")
     return parser.parse_args()
 
@@ -276,6 +325,38 @@ def main() -> None:
     elif "google" in providers and not args.google_api_key:
         LOGGER.warning("Google provider requested but no API key provided; skipping Google enrichment.")
 
+    overture_provider: Optional[OvertureBuildingsProvider] = None
+    overture_enabled = "overture" in providers
+    overture_matches = 0
+    overture_errors = 0
+
+    if overture_enabled:
+        overture_cache_dir = args.overture_cache_dir.expanduser().resolve()
+        overture_cache_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            overture_provider = OvertureBuildingsProvider(
+                base_url=args.overture_endpoint,
+                theme=args.overture_theme,
+                search_radius_m=args.provider_radius,
+                cache_quantization_m=args.provider_cache_quantization,
+                match_distance_m=args.match_distance,
+                sleep_between_requests=args.request_sleep,
+                limit=args.overture_limit,
+                include_fields=args.overture_include_fields,
+                category_fields=args.overture_category_fields,
+                name_fields=args.overture_name_fields,
+                timeout=args.overture_timeout,
+                cache_dir=overture_cache_dir,
+                cache_only=args.overture_cache_only,
+            )
+        except RuntimeError as exc:
+            LOGGER.error("Unable to initialise Overture provider: %s", exc)
+            overture_provider = None
+            overture_enabled = False
+        else:
+            prefetch_radius = args.overture_prefetch_radius if args.overture_prefetch_radius is not None else args.radius
+            overture_provider.configure_prefetch_region(args.lat, args.lon, prefetch_radius)
+
     filtered_features: List[Dict[str, Any]] = []
     skipped_filter = 0
     for feature in features:
@@ -312,6 +393,8 @@ def main() -> None:
         props["stage1_conflict"] = stage1.conflict
         provider_data = None
 
+        overture_data = None
+
         centroid_lat = props.get("centroid_lat")
         centroid_lon = props.get("centroid_lon")
         grid_key = None
@@ -327,6 +410,22 @@ def main() -> None:
                         provider_data = cached_result
                 else:
                     provider_data = None
+
+        if overture_provider and centroid_lat is not None and centroid_lon is not None:
+            try:
+                overture_data = overture_provider.lookup(centroid_lat, centroid_lon, feature)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Overture lookup failed near %.6f, %.6f: %s",
+                    centroid_lat,
+                    centroid_lon,
+                    exc,
+                )
+                overture_errors += 1
+                overture_data = None
+            else:
+                if overture_data:
+                    overture_matches += 1
 
         if provider_data is None and google_client and should_use_google(stage1, args.uncertainty_threshold):
             place_id = props.get(args.place_id_property) or props.get("place_id")
@@ -354,47 +453,70 @@ def main() -> None:
         elif provider_data is None and not should_use_google(stage1, args.uncertainty_threshold):
             skipped_confidence += 1
 
+        provider_types: List[str] = []
+        provider_sources: List[str] = []
+        provider_confidence = stage1.confidence
+        provider_place_id = props.get(args.place_id_property)
+        provider_vicinity: Optional[str] = None
+
+        if overture_data:
+            provider_sources.append("overture_buildings")
+            overture_categories = [str(category) for category in overture_data.categories if category]
+            for category in overture_categories:
+                if category not in provider_types:
+                    provider_types.append(category)
+            provider_confidence = max(provider_confidence, overture_data.confidence or 0.0)
+            if overture_data.place_id and not provider_place_id:
+                provider_place_id = overture_data.place_id
+            props.update(
+                {
+                    "overture_place_id": overture_data.place_id,
+                    "overture_categories": overture_categories,
+                    "overture_distance_m": overture_data.distance_m,
+                    "overture_confidence": overture_data.confidence,
+                    "overture_raw": overture_data.raw,
+                }
+            )
+
         if provider_data:
-            provider_types = list(provider_data.types)
-            (enriched_primary, enriched_secondary, enriched_tertiary, category_path, category_provenance) = combine_labels(
-                props, provider_types
-            )
-            props.update(
-                {
-                    "enriched_primary_label": enriched_primary,
-                    "enriched_secondary_label": enriched_secondary,
-                    "enriched_tertiary_label": enriched_tertiary,
-                    "enriched_category_path": category_path,
-                    "enriched_category_provenance": category_provenance,
-                    "enriched_name": provider_data.name or props.get("name") or "",
-                    "enriched_name_provenance": "google_places" if provider_data.name else "osm",
-                    "provider_place_id": provider_data.place_id,
-                    "provider_vicinity": provider_data.vicinity,
-                    "provider_types": provider_types,
-                    "provider_sources": ["google_places"],
-                    "provider_confidence": max(stage1.confidence, 0.8),
-                }
-            )
-        else:
-            (enriched_primary, enriched_secondary, enriched_tertiary, category_path, category_provenance) = combine_labels(
-                props, []
-            )
-            props.update(
-                {
-                    "enriched_primary_label": enriched_primary,
-                    "enriched_secondary_label": enriched_secondary,
-                    "enriched_tertiary_label": enriched_tertiary,
-                    "enriched_category_path": category_path,
-                    "enriched_category_provenance": category_provenance,
-                    "enriched_name": props.get("name") or "",
-                    "enriched_name_provenance": "osm" if props.get("name") else "",
-                    "provider_place_id": props.get(args.place_id_property),
-                    "provider_vicinity": None,
-                    "provider_types": [],
-                    "provider_sources": [],
-                    "provider_confidence": stage1.confidence,
-                }
-            )
+            for provider_type in provider_data.types:
+                if provider_type and provider_type not in provider_types:
+                    provider_types.append(provider_type)
+            if "google_places" not in provider_sources:
+                provider_sources.append("google_places")
+            provider_confidence = max(provider_confidence, 0.8)
+            provider_place_id = provider_data.place_id or provider_place_id
+            provider_vicinity = provider_data.vicinity
+
+        (enriched_primary, enriched_secondary, enriched_tertiary, category_path, category_provenance) = combine_labels(
+            props, provider_types
+        )
+
+        enriched_name = props.get("name") or ""
+        enriched_name_provenance = "osm" if enriched_name else ""
+        if overture_data and overture_data.name:
+            enriched_name = overture_data.name
+            enriched_name_provenance = "overture_buildings"
+        if provider_data and provider_data.name:
+            enriched_name = provider_data.name
+            enriched_name_provenance = "google_places"
+
+        props.update(
+            {
+                "enriched_primary_label": enriched_primary,
+                "enriched_secondary_label": enriched_secondary,
+                "enriched_tertiary_label": enriched_tertiary,
+                "enriched_category_path": category_path,
+                "enriched_category_provenance": category_provenance,
+                "enriched_name": enriched_name,
+                "enriched_name_provenance": enriched_name_provenance,
+                "provider_place_id": provider_place_id,
+                "provider_vicinity": provider_vicinity,
+                "provider_types": provider_types,
+                "provider_sources": provider_sources,
+                "provider_confidence": provider_confidence,
+            }
+        )
 
         feature["properties"] = props
         enriched_features.append(feature)
@@ -442,6 +564,9 @@ def main() -> None:
                 "skipped_place_id": skipped_no_place_id,
                 "provider_requests": google_client.request_count if google_client else 0,
                 "provider_matches": matched,
+                "overture_enabled": overture_enabled,
+                "overture_matches": overture_matches,
+                "overture_errors": overture_errors,
             }
         }
     )
@@ -451,6 +576,8 @@ def main() -> None:
 
     if google_client:
         google_client.close()
+    if overture_provider:
+        overture_provider.close()
 
     LOGGER.info(
         "Finished. google_calls_details_min=%d cache_hit_rate=%.2f skipped_budget=%d skipped_filter=%d skipped_confidence=%d",

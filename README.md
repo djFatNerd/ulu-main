@@ -54,50 +54,40 @@ Environment overrides shared across scripts include `MATCH_DISTANCE`,
 
 ### Mode quick reference
 
-| Mode | Shell script | Python entrypoint / function | Providers merged | Credentials required |
-| --- | --- | --- | --- | --- |
-| OSM only | `run_osm.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider osm`) | OSM | none |
-| Overture only | `run_overture.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider overture`) | Overture | `overturemaps` package |
-| Google Places (full details) | `run_google_full.sh` (`run_google.sh` aliases it) | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider google`) | Google | `GOOGLE_MAPS_API_KEY` or `GOOGLE_API_KEY` |
-| Google Places (cost-down) | `run_google_cost_down.sh` | `tools/multisource/generate_semantic_dataset_cost_down.py:main` | OSM + Google (minimal lookups) | `GOOGLE_MAPS_API_KEY` or `GOOGLE_API_KEY` |
-| OSM + Google Places | `run_osm_google.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider osm_google`) | OSM + Google | `GOOGLE_MAPS_API_KEY` or `GOOGLE_API_KEY` |
-| OSM + Overture | `run_osm_overture.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider osm_overture`) | OSM + Overture | `overturemaps` package |
-| Overture + Google Places | `run_overture_google.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--providers overture google`) | Overture + Google | `overturemaps` package, Google API key |
-| OSM + Overture + Google Places | `run_osm_overture_google.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--providers osm overture google`) | OSM + Overture + Google | `overturemaps` package, Google API key |
+| Workflow | Command | Providers merged | Credentials required |
+| --- | --- | --- | --- |
+| OSM only | `./scripts/run_osm.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM | none |
+| OSM + Overture (free stack) | `./scripts/run_osm_overture.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture | `overturemaps` package |
+| OSM + Overture + Google (full details) | `./scripts/run_osm_overture_google.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture + Google Places | `GOOGLE_MAPS_API_KEY` (or `GOOGLE_API_KEY`), `overturemaps` package |
+| OSM + Overture + Google (cost-down) | `./scripts/run_osm_overture_google.sh --cost-down LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture + Google Places (budget-optimised) | `GOOGLE_MAPS_API_KEY` (or `GOOGLE_API_KEY`), `overturemaps` package |
 
-### Per-mode usage examples
+The specialised scripts (`run_google_full.sh`, `run_google_cost_down.sh`, `run_osm_google.sh`, etc.) remain available for
+provider-specific debugging or legacy automation, but the table above covers the
+recommended combinations.
+
+### Usage examples
 
 ```bash
-# 1. OSM-only dataset
+# OSM-only dataset
 ./scripts/run_osm.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm
 
-# 2. Overture-only dataset
-./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
-
-# 3. Google Places (full details, Google geometry only)
-GOOGLE_MAPS_API_KEY=... ./scripts/run_google_full.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_google
-
-# 4. Google Places (cost-down mode with staged lookups)
-GOOGLE_MAPS_API_KEY=... ./scripts/run_google_cost_down.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_google_cost_down
-
-# 5. OSM + Google enrichment
-GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_google
-
-# 6. OSM + Overture enrichment
+# OSM + Overture (free enrichment)
 ./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
 
-# 7. Overture + Google enrichment
-GOOGLE_MAPS_API_KEY=... ./scripts/run_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture_google
-
-# 8. OSM + Overture + Google enrichment
+# Full Google enrichment (all fields)
 GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
+
+# Cost-down Google enrichment (minimal paid calls)
+GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh --cost-down 40.7580 -73.9855 1000 1.0 \
+  ./semantic_dataset_osm_overture_google_cost_down
 ```
 
-**Google cost-down mode** minimises paid API usage by first classifying OSM
-labels and only requesting Google Place Details for uncertain buildings. Tune
-its behaviour via environment variables such as `GOOGLE_BUDGET_REQUESTS`,
-`GOOGLE_QPS_MAX`, `UNCERTAINTY_THRESHOLD`, and `FEATURE_FILTER`; these map to the
-underlying arguments of `generate_semantic_dataset_cost_down.py`.
+**Google cost-down mode** now layers Google Place Details on top of the free OSM
+and Overture downloads, then minimises paid API usage by only requesting
+additional details for uncertain buildings. Tune its behaviour via environment
+variables such as `GOOGLE_BUDGET_REQUESTS`, `GOOGLE_QPS_MAX`,
+`UNCERTAINTY_THRESHOLD`, and `FEATURE_FILTER`; these map to the underlying
+arguments of `generate_semantic_dataset_cost_down.py`.
 
 ## Comprehensive regional bundle
 
