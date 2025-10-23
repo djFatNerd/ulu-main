@@ -52,30 +52,52 @@ Environment overrides shared across scripts include `MATCH_DISTANCE`,
 `FALLBACK_OVERPASS`. Provider-specific options (e.g. `OVERTURE_THEME`,
 `OVERTURE_CACHE_DIR`) are passed through to the underlying tooling.
 
-### Available combinations
+### Mode quick reference
 
-| Script | Providers merged | Credentials required |
-| --- | --- | --- |
-| `run_osm.sh` | OSM only | none |
-| `run_overture.sh` | Overture only | `overturemaps` package |
-| `run_google.sh` | Google Places on top of OSM geometry | `GOOGLE_MAPS_API_KEY` |
-| `run_osm_google.sh` | OSM + Google Places | `GOOGLE_MAPS_API_KEY` |
-| `run_osm_overture.sh` | OSM + Overture Maps | `overturemaps` package |
-| `run_overture_google.sh` | Overture Maps + Google Places | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
-| `run_osm_overture_google.sh` | OSM + Overture Maps + Google Places | `overturemaps` package, `GOOGLE_MAPS_API_KEY` |
+| Mode | Shell script | Python entrypoint / function | Providers merged | Credentials required |
+| --- | --- | --- | --- | --- |
+| OSM only | `run_osm.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider osm`) | OSM | none |
+| Overture only | `run_overture.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider overture`) | Overture | `overturemaps` package |
+| Google Places (full details) | `run_google_full.sh` (`run_google.sh` aliases it) | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider google`) | Google | `GOOGLE_MAPS_API_KEY` or `GOOGLE_API_KEY` |
+| Google Places (cost-down) | `run_google_cost_down.sh` | `tools/multisource/generate_semantic_dataset_cost_down.py:main` | OSM + Google (minimal lookups) | `GOOGLE_MAPS_API_KEY` or `GOOGLE_API_KEY` |
+| OSM + Google Places | `run_osm_google.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider osm_google`) | OSM + Google | `GOOGLE_MAPS_API_KEY` or `GOOGLE_API_KEY` |
+| OSM + Overture | `run_osm_overture.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--provider osm_overture`) | OSM + Overture | `overturemaps` package |
+| Overture + Google Places | `run_overture_google.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--providers overture google`) | Overture + Google | `overturemaps` package, Google API key |
+| OSM + Overture + Google Places | `run_osm_overture_google.sh` | `tools/multisource/generate_semantic_dataset_enriched.py:main` (`--providers osm overture google`) | OSM + Overture + Google | `overturemaps` package, Google API key |
 
-Example invocations:
+### Per-mode usage examples
 
 ```bash
-# OSM-only dataset
+# 1. OSM-only dataset
 ./scripts/run_osm.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm
 
-# OSM + Google Places enrichment
+# 2. Overture-only dataset
+./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
+
+# 3. Google Places (full details, Google geometry only)
+GOOGLE_MAPS_API_KEY=... ./scripts/run_google_full.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_google
+
+# 4. Google Places (cost-down mode with staged lookups)
+GOOGLE_MAPS_API_KEY=... ./scripts/run_google_cost_down.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_google_cost_down
+
+# 5. OSM + Google enrichment
 GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_google
 
-# Overture-only dataset
-./scripts/run_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture
+# 6. OSM + Overture enrichment
+./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
+
+# 7. Overture + Google enrichment
+GOOGLE_MAPS_API_KEY=... ./scripts/run_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_overture_google
+
+# 8. OSM + Overture + Google enrichment
+GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
 ```
+
+**Google cost-down mode** minimises paid API usage by first classifying OSM
+labels and only requesting Google Place Details for uncertain buildings. Tune
+its behaviour via environment variables such as `GOOGLE_BUDGET_REQUESTS`,
+`GOOGLE_QPS_MAX`, `UNCERTAINTY_THRESHOLD`, and `FEATURE_FILTER`; these map to the
+underlying arguments of `generate_semantic_dataset_cost_down.py`.
 
 ## Comprehensive regional bundle
 
