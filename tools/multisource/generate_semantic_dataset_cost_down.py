@@ -548,7 +548,7 @@ def main() -> None:
     collection = {"type": "FeatureCollection", "features": enriched_features}
     output_geojson = args.output / "buildings_enriched.geojson"
     with output_geojson.open("w", encoding="utf-8") as handle:
-        json.dump(collection, handle, ensure_ascii=False)
+        json.dump(collection, handle, ensure_ascii=False, indent=2)
 
     metadata["buildings_geojson"] = str(output_geojson)
     if google_client:
