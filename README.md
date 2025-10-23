@@ -58,6 +58,7 @@ Environment overrides shared across scripts include `MATCH_DISTANCE`,
 | --- | --- | --- | --- |
 | OSM only | `./scripts/run_osm.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM | none |
 | OSM + Overture (free stack) | `./scripts/run_osm_overture.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture | `overturemaps` package |
+| OSM + Overture (raw payloads) | `./scripts/run_osm_overture_full.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture | `overturemaps` package |
 | OSM + Overture + Google (full details) | `./scripts/run_osm_overture_google.sh LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture + Google Places | `GOOGLE_MAPS_API_KEY` (or `GOOGLE_API_KEY`), `overturemaps` package |
 | OSM + Overture + Google (cost-down) | `./scripts/run_osm_overture_google.sh --cost-down LAT LON RADIUS [RESOLUTION] [OUTPUT_DIR]` | OSM + Overture + Google Places (budget-optimised) | `GOOGLE_MAPS_API_KEY` (or `GOOGLE_API_KEY`), `overturemaps` package |
 
@@ -73,6 +74,9 @@ recommended combinations.
 
 # OSM + Overture (free enrichment)
 ./scripts/run_osm_overture.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture
+
+# OSM + Overture with full raw payloads and minimal filtering
+./scripts/run_osm_overture_full.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_full
 
 # Full Google enrichment (all fields)
 GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
