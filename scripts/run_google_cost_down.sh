@@ -21,7 +21,11 @@ OUTPUT_DIR="${5:-./semantic_dataset_google_cost_down}"
 
 LOG_LEVEL="${LOG_LEVEL:-INFO}"
 OVERPASS_URL_VALUE="${OVERPASS_URL:-https://overpass-api.de/api/interpreter}"
-PROVIDERS_CSV="${GOOGLE_COST_DOWN_PROVIDERS:-osm,google}"
+PROVIDERS_CSV="${GOOGLE_COST_DOWN_PROVIDERS:-osm,overture,google}"
+MATCH_DISTANCE_VALUE="${MATCH_DISTANCE:-35.0}"
+PROVIDER_RADIUS_VALUE="${PROVIDER_RADIUS:-50.0}"
+PROVIDER_CACHE_QUANTIZATION_VALUE="${PROVIDER_CACHE_QUANTIZATION:-25.0}"
+REQUEST_SLEEP_VALUE="${REQUEST_SLEEP:-0.2}"
 
 GOOGLE_API_KEY="${GOOGLE_MAPS_API_KEY:-${GOOGLE_API_KEY:-}}"
 if [[ "${PROVIDERS_CSV,,}" == *"google"* && -z "$GOOGLE_API_KEY" ]]; then
@@ -36,6 +40,10 @@ CMD=(
   --output "$OUTPUT_DIR"
   --overpass-url "$OVERPASS_URL_VALUE"
   --providers "$PROVIDERS_CSV"
+  --match-distance "$MATCH_DISTANCE_VALUE"
+  --provider-radius "$PROVIDER_RADIUS_VALUE"
+  --provider-cache-quantization "$PROVIDER_CACHE_QUANTIZATION_VALUE"
+  --request-sleep "$REQUEST_SLEEP_VALUE"
   --log-level "$LOG_LEVEL"
 )
 
@@ -50,6 +58,53 @@ fi
 
 if [[ -n "${GOOGLE_MODE:-}" ]]; then
   CMD+=(--google-mode "${GOOGLE_MODE}")
+fi
+
+if [[ -n "${OVERTURE_ENDPOINT:-}" ]]; then
+  CMD+=(--overture-endpoint "${OVERTURE_ENDPOINT}")
+fi
+
+if [[ -n "${OVERTURE_THEME:-}" ]]; then
+  CMD+=(--overture-theme "${OVERTURE_THEME}")
+fi
+
+if [[ -n "${OVERTURE_LIMIT:-}" ]]; then
+  CMD+=(--overture-limit "${OVERTURE_LIMIT}")
+fi
+
+if [[ -n "${OVERTURE_INCLUDE_FIELDS:-}" ]]; then
+  IFS=' ' read -r -a INCLUDE_FIELDS <<< "${OVERTURE_INCLUDE_FIELDS}"
+  CMD+=(--overture-include-fields "${INCLUDE_FIELDS[@]}")
+fi
+
+if [[ -n "${OVERTURE_CATEGORY_FIELDS:-}" ]]; then
+  IFS=' ' read -r -a CATEGORY_FIELDS <<< "${OVERTURE_CATEGORY_FIELDS}"
+  CMD+=(--overture-category-fields "${CATEGORY_FIELDS[@]}")
+fi
+
+if [[ -n "${OVERTURE_NAME_FIELDS:-}" ]]; then
+  IFS=' ' read -r -a NAME_FIELDS <<< "${OVERTURE_NAME_FIELDS}"
+  CMD+=(--overture-name-fields "${NAME_FIELDS[@]}")
+fi
+
+if [[ -n "${OVERTURE_TIMEOUT:-}" ]]; then
+  CMD+=(--overture-timeout "${OVERTURE_TIMEOUT}")
+fi
+
+if [[ -n "${OVERTURE_CACHE_DIR:-}" ]]; then
+  CMD+=(--overture-cache-dir "${OVERTURE_CACHE_DIR}")
+fi
+
+if [[ -n "${OVERTURE_CACHE_ONLY:-}" ]]; then
+  case "${OVERTURE_CACHE_ONLY,,}" in
+    1|true|yes|on)
+      CMD+=(--overture-cache-only)
+      ;;
+  esac
+fi
+
+if [[ -n "${OVERTURE_PREFETCH_RADIUS:-}" ]]; then
+  CMD+=(--overture-prefetch-radius "${OVERTURE_PREFETCH_RADIUS}")
 fi
 
 if [[ -n "${GOOGLE_FIELDS:-}" ]]; then
