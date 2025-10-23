@@ -6,10 +6,15 @@ import argparse
 import json
 import logging
 import math
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
 from tools.multisource.providers.google_provider import GooglePlacesDetailsClient
 from tools.osm import (
