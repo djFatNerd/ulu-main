@@ -84,6 +84,30 @@ def ensure_local_sample_dataset() -> Optional[Path]:
 
 PREFERRED_LANGUAGE_KEYS = ("primary", "en", "und", "default")
 
+# ``local_type`` values in Overture occasionally vary between releases.  The
+# constants below capture the identifiers that clearly represent city-scale
+# features so we can filter them without relying solely on population
+# heuristics.
+CITY_LOCAL_TYPE_VALUES = {
+    "city",
+    "capital",
+    "capital_city",
+    "megacity",
+    "metropolis",
+    "metropolitan_city",
+    "municipality_city",
+    "primary_city",
+    "principal_city",
+}
+
+# Some localities include "city" in their identifier but represent smaller
+# subdivisions.  Skip these explicitly so they do not bloat the global output.
+CITY_LOCAL_TYPE_EXCLUDED = {"city_section", "city_district", "city_township"}
+
+# A few releases emit namespaced identifiers such as "locality/city" or
+# "locality:capital_city".  Treat these as city scale as well.
+CITY_LOCAL_TYPE_SUFFIXES = ("/city", ":city", "_city")
+
 
 @dataclass
 class CityDoc:
@@ -199,7 +223,7 @@ def configure_duckdb(conn: duckdb.DuckDBPyConnection) -> Tuple[bool, bool]:
     return spatial_available, httpfs_available
 
 
-def resolve_dataset_uri(dataset_uri: str) -> str:
+def resolve_dataset_uri(dataset_uri: str, *, httpfs_available: bool) -> str:
     """Resolve the dataset URI, considering environment overrides and fallbacks."""
 
     env_uri = os.environ.get("OVERTURE_DIVISIONS_DATASET_URI")
@@ -207,12 +231,12 @@ def resolve_dataset_uri(dataset_uri: str) -> str:
         LOGGER.info("Using dataset URI from $OVERTURE_DIVISIONS_DATASET_URI: %s", env_uri)
         return env_uri
 
-    if dataset_uri == DEFAULT_DATASET_URI:
+    if dataset_uri == DEFAULT_DATASET_URI and not httpfs_available:
         local_dataset = ensure_local_sample_dataset()
         if local_dataset:
             local_uri = str(local_dataset)
             LOGGER.info(
-                "Using bundled local sample dataset instead of the default S3 URI: %s",
+                "DuckDB httpfs extension unavailable; falling back to bundled sample dataset: %s",
                 local_uri,
             )
             return local_uri
@@ -343,10 +367,42 @@ def parse_population(value: Any) -> Optional[int]:
             return None
         return int(value)
     if isinstance(value, str):
+        candidate = re.search(r"[-+]?\d[\d,._\s]*", value)
+        if not candidate:
+            return None
+        cleaned = re.sub(r"[^0-9.+-]", "", candidate.group())
         try:
-            return int(value)
+            numeric = float(cleaned)
         except ValueError:
             return None
+        if math.isnan(numeric):
+            return None
+        suffix = value[candidate.end() :].lower()
+        multiplier = 1
+        if any(token in suffix for token in ("billion", "bn")):
+            multiplier = 1_000_000_000
+        elif any(token in suffix for token in ("million", "mn")):
+            multiplier = 1_000_000
+        elif any(token in suffix for token in ("thousand", "k")):
+            multiplier = 1_000
+        return int(numeric * multiplier)
+    if isinstance(value, dict):
+        for key in ("population", "value", "total", "estimate", "count"):
+            if key in value:
+                parsed = parse_population(value[key])
+                if parsed is not None:
+                    return parsed
+        for nested in value.values():
+            parsed = parse_population(nested)
+            if parsed is not None:
+                return parsed
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            parsed = parse_population(item)
+            if parsed is not None:
+                return parsed
+        return None
     return None
 
 
@@ -382,8 +438,19 @@ def estimate_radius(population: Optional[int]) -> int:
 
 
 def is_city(local_type: Optional[str], population: Optional[int], min_population: int) -> bool:
-    if local_type == "city":
-        return True
+    if local_type:
+        local_type = local_type.strip()
+        if local_type in CITY_LOCAL_TYPE_VALUES:
+            return True
+        if local_type in CITY_LOCAL_TYPE_EXCLUDED:
+            pass
+        else:
+            if any(local_type.endswith(suffix) for suffix in CITY_LOCAL_TYPE_SUFFIXES):
+                return True
+            if "city" in local_type and local_type not in CITY_LOCAL_TYPE_EXCLUDED:
+                return True
+            if local_type.startswith("capital"):
+                return True
     if population and population >= min_population:
         return True
     return False
@@ -413,7 +480,7 @@ def build_city_docs(args: argparse.Namespace) -> Tuple[int, int]:
     created = 0
     errors = 0
 
-    dataset_uri = resolve_dataset_uri(args.dataset_uri)
+    dataset_uri = resolve_dataset_uri(args.dataset_uri, httpfs_available=httpfs_available)
 
     if dataset_uri.startswith("s3://") and not httpfs_available:
         raise RuntimeError(
