@@ -223,7 +223,7 @@ def configure_duckdb(conn: duckdb.DuckDBPyConnection) -> Tuple[bool, bool]:
     return spatial_available, httpfs_available
 
 
-def resolve_dataset_uri(dataset_uri: str) -> str:
+def resolve_dataset_uri(dataset_uri: str, *, httpfs_available: bool) -> str:
     """Resolve the dataset URI, considering environment overrides and fallbacks."""
 
     env_uri = os.environ.get("OVERTURE_DIVISIONS_DATASET_URI")
@@ -231,12 +231,12 @@ def resolve_dataset_uri(dataset_uri: str) -> str:
         LOGGER.info("Using dataset URI from $OVERTURE_DIVISIONS_DATASET_URI: %s", env_uri)
         return env_uri
 
-    if dataset_uri == DEFAULT_DATASET_URI:
+    if dataset_uri == DEFAULT_DATASET_URI and not httpfs_available:
         local_dataset = ensure_local_sample_dataset()
         if local_dataset:
             local_uri = str(local_dataset)
             LOGGER.info(
-                "Using bundled local sample dataset instead of the default S3 URI: %s",
+                "DuckDB httpfs extension unavailable; falling back to bundled sample dataset: %s",
                 local_uri,
             )
             return local_uri
@@ -480,7 +480,7 @@ def build_city_docs(args: argparse.Namespace) -> Tuple[int, int]:
     created = 0
     errors = 0
 
-    dataset_uri = resolve_dataset_uri(args.dataset_uri)
+    dataset_uri = resolve_dataset_uri(args.dataset_uri, httpfs_available=httpfs_available)
 
     if dataset_uri.startswith("s3://") and not httpfs_available:
         raise RuntimeError(
