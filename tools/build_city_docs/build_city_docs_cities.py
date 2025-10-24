@@ -223,6 +223,74 @@ def configure_duckdb(conn: duckdb.DuckDBPyConnection) -> Tuple[bool, bool]:
     return spatial_available, httpfs_available
 
 
+def build_local_type_text_expression() -> str:
+    """Return a DuckDB SQL expression that normalises ``local_type`` to text."""
+
+    json_expr = "CAST(local_type AS JSON)"
+    candidates = [
+        f"TRY(lower(json_extract_string({json_expr}, '$.primary')))",
+        f"TRY(lower(json_extract_string({json_expr}, '$.default')))",
+        f"TRY(lower(json_extract_string({json_expr}, '$.en')))",
+        f"TRY(lower(json_extract_string({json_expr}, '$.und')))",
+        "TRY(lower(CAST(local_type AS VARCHAR)))",
+    ]
+    return "COALESCE(" + ", ".join(candidates + ["''"]) + ")"
+
+
+def build_population_numeric_expression() -> str:
+    """Return a DuckDB SQL expression that extracts a numeric population value."""
+
+    json_expr = "CAST(population AS JSON)"
+    candidates = [
+        "TRY_CAST(population AS BIGINT)",
+        f"TRY_CAST(json_extract({json_expr}, '$') AS BIGINT)",
+        f"TRY_CAST(json_extract({json_expr}, '$.value') AS BIGINT)",
+        f"TRY_CAST(json_extract({json_expr}, '$.total') AS BIGINT)",
+        f"TRY_CAST(json_extract({json_expr}, '$.estimate') AS BIGINT)",
+        f"TRY_CAST(json_extract({json_expr}, '$.population') AS BIGINT)",
+    ]
+    return "COALESCE(" + ", ".join(candidates) + ")"
+
+
+def build_city_filter_sql(
+    local_type_expr: str, population_expr: str, min_population: int
+) -> str:
+    """Return the SQL ``WHERE`` predicate that keeps city-scale localities only."""
+
+    allowed_values = ", ".join(f"'{value}'" for value in sorted(CITY_LOCAL_TYPE_VALUES))
+    excluded_values = ", ".join(f"'{value}'" for value in sorted(CITY_LOCAL_TYPE_EXCLUDED))
+
+    suffix_conditions = [
+        f"ends_with({local_type_expr}, '{suffix}')" for suffix in CITY_LOCAL_TYPE_SUFFIXES
+    ]
+
+    city_type_conditions = [f"{local_type_expr} IN ({allowed_values})"]
+    if suffix_conditions:
+        city_type_conditions.append("(" + " OR ".join(suffix_conditions) + ")")
+
+    contains_condition = f"contains({local_type_expr}, 'city')"
+    if excluded_values:
+        contains_condition = (
+            f"({contains_condition} AND {local_type_expr} NOT IN ({excluded_values}))"
+        )
+    city_type_conditions.extend(
+        [
+            contains_condition,
+            f"starts_with({local_type_expr}, 'capital')",
+        ]
+    )
+
+    type_filter = "(" + " OR ".join(city_type_conditions) + ")"
+
+    population_filter = f"{population_expr} >= {min_population}"
+
+    combined_filter = f"({type_filter} OR {population_filter})"
+
+    if excluded_values:
+        return f"({local_type_expr} NOT IN ({excluded_values}) AND {combined_filter})"
+    return combined_filter
+
+
 def resolve_dataset_uri(dataset_uri: str, *, httpfs_available: bool) -> str:
     """Resolve the dataset URI, considering environment overrides and fallbacks."""
 
@@ -281,6 +349,7 @@ def query_localities(
     dataset_uri: str,
     fetch_batch: int,
     spatial_available: bool,
+    min_population: int,
 ) -> Iterator[Dict[str, Any]]:
     """Stream locality rows from the divisions dataset."""
 
@@ -299,6 +368,12 @@ def query_localities(
     column_names = [description[0] for description in preview_cursor.description]
     lat_expr, lon_expr = determine_coordinate_expressions(column_names, spatial_available)
 
+    local_type_text_expr = build_local_type_text_expression()
+    population_numeric_expr = build_population_numeric_expression()
+    city_filter = build_city_filter_sql(
+        local_type_text_expr, population_numeric_expr, min_population
+    )
+
     sql = f"""
         SELECT
             id,
@@ -307,9 +382,12 @@ def query_localities(
             local_type,
             names,
             {lat_expr} AS lat,
-            {lon_expr} AS lon
+            {lon_expr} AS lon,
+            {local_type_text_expr} AS local_type_text,
+            {population_numeric_expr} AS population_numeric
         FROM read_parquet('{dataset_uri}')
         WHERE subtype = 'locality'
+          AND {city_filter}
     """
 
     cursor = conn.execute(sql)
@@ -491,11 +569,13 @@ def build_city_docs(args: argparse.Namespace) -> Tuple[int, int]:
 
     try:
         for record in query_localities(
-            conn, dataset_uri, args.fetch_batch, spatial_available
+            conn, dataset_uri, args.fetch_batch, spatial_available, args.min_population
         ):
             try:
                 local_type = normalise_local_type(record.get("local_type"))
                 population = parse_population(record.get("population"))
+                if population is None:
+                    population = parse_population(record.get("population_numeric"))
                 if not is_city(local_type, population, args.min_population):
                     continue
 
