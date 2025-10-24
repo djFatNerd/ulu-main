@@ -24,6 +24,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_DATASET_URI = (
     "s3://overturemaps-us-west-2/release/2024-02-14.0/"
     "theme=divisions/type=division/subtype=locality/*.parquet"
+    "s3://overturemaps-us-west-2/release/2024-02-14.0/theme=divisions/type=division/*.parquet"
 )
 DEFAULT_OUTPUT_DIR = Path("data/city_docs")
 DEFAULT_MIN_POPULATION = 50_000
@@ -147,6 +148,7 @@ def query_localities(
             "double-check the release path and ensure outbound network access "
             "is available."
         ) from exc
+    cursor = conn.execute(sql)
     columns = [desc[0] for desc in cursor.description]
 
     while True:
@@ -332,6 +334,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.error("%s", exc)
         LOGGER.debug("Dataset resolution failure", exc_info=True)
         return 1
+    created, errors = build_city_docs(args)
     LOGGER.info("City-level docs complete: created=%s, errors=%s", created, errors)
     return 0 if errors == 0 else 1
 
