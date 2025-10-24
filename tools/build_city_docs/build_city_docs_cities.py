@@ -84,6 +84,30 @@ def ensure_local_sample_dataset() -> Optional[Path]:
 
 PREFERRED_LANGUAGE_KEYS = ("primary", "en", "und", "default")
 
+# ``local_type`` values in Overture occasionally vary between releases.  The
+# constants below capture the identifiers that clearly represent city-scale
+# features so we can filter them without relying solely on population
+# heuristics.
+CITY_LOCAL_TYPE_VALUES = {
+    "city",
+    "capital",
+    "capital_city",
+    "megacity",
+    "metropolis",
+    "metropolitan_city",
+    "municipality_city",
+    "primary_city",
+    "principal_city",
+}
+
+# Some localities include "city" in their identifier but represent smaller
+# subdivisions.  Skip these explicitly so they do not bloat the global output.
+CITY_LOCAL_TYPE_EXCLUDED = {"city_section", "city_district", "city_township"}
+
+# A few releases emit namespaced identifiers such as "locality/city" or
+# "locality:capital_city".  Treat these as city scale as well.
+CITY_LOCAL_TYPE_SUFFIXES = ("/city", ":city", "_city")
+
 
 @dataclass
 class CityDoc:
@@ -343,10 +367,42 @@ def parse_population(value: Any) -> Optional[int]:
             return None
         return int(value)
     if isinstance(value, str):
+        candidate = re.search(r"[-+]?\d[\d,._\s]*", value)
+        if not candidate:
+            return None
+        cleaned = re.sub(r"[^0-9.+-]", "", candidate.group())
         try:
-            return int(value)
+            numeric = float(cleaned)
         except ValueError:
             return None
+        if math.isnan(numeric):
+            return None
+        suffix = value[candidate.end() :].lower()
+        multiplier = 1
+        if any(token in suffix for token in ("billion", "bn")):
+            multiplier = 1_000_000_000
+        elif any(token in suffix for token in ("million", "mn")):
+            multiplier = 1_000_000
+        elif any(token in suffix for token in ("thousand", "k")):
+            multiplier = 1_000
+        return int(numeric * multiplier)
+    if isinstance(value, dict):
+        for key in ("population", "value", "total", "estimate", "count"):
+            if key in value:
+                parsed = parse_population(value[key])
+                if parsed is not None:
+                    return parsed
+        for nested in value.values():
+            parsed = parse_population(nested)
+            if parsed is not None:
+                return parsed
+        return None
+    if isinstance(value, (list, tuple, set)):
+        for item in value:
+            parsed = parse_population(item)
+            if parsed is not None:
+                return parsed
+        return None
     return None
 
 
@@ -382,8 +438,19 @@ def estimate_radius(population: Optional[int]) -> int:
 
 
 def is_city(local_type: Optional[str], population: Optional[int], min_population: int) -> bool:
-    if local_type == "city":
-        return True
+    if local_type:
+        local_type = local_type.strip()
+        if local_type in CITY_LOCAL_TYPE_VALUES:
+            return True
+        if local_type in CITY_LOCAL_TYPE_EXCLUDED:
+            pass
+        else:
+            if any(local_type.endswith(suffix) for suffix in CITY_LOCAL_TYPE_SUFFIXES):
+                return True
+            if "city" in local_type and local_type not in CITY_LOCAL_TYPE_EXCLUDED:
+                return True
+            if local_type.startswith("capital"):
+                return True
     if population and population >= min_population:
         return True
     return False
