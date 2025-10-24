@@ -1,5 +1,7 @@
 **__pycache__**
 **build**
+!tools/build_city_docs/
+!tools/build_city_docs/**
 **egg-info**
 **dist**
 *.pyc
