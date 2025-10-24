@@ -21,10 +21,15 @@ import duckdb
 
 LOGGER = logging.getLogger(__name__)
 
+# NOTE: The divisions dataset includes all subtypes within a single parquet
+# collection.  We filter to localities within the query itself, so we only need
+# to point DuckDB at the overarching divisions files.  Previously this constant
+# attempted to concatenate two different globs, which produced an invalid URI
+# such as ``.../*.parquets3://.../*.parquet``.  Keeping a single, valid glob
+# ensures DuckDB can resolve the dataset successfully.
 DEFAULT_DATASET_URI = (
     "s3://overturemaps-us-west-2/release/2024-02-14.0/"
-    "theme=divisions/type=division/subtype=locality/*.parquet"
-    "s3://overturemaps-us-west-2/release/2024-02-14.0/theme=divisions/type=division/*.parquet"
+    "theme=divisions/type=division/*.parquet"
 )
 DEFAULT_OUTPUT_DIR = Path("data/city_docs")
 DEFAULT_MIN_POPULATION = 50_000
