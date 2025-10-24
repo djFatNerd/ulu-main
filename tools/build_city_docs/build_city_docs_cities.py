@@ -8,9 +8,11 @@ changes where certain fields occasionally flip between scalar and MAP types.
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import logging
 import math
+import os
 import re
 import sys
 from dataclasses import dataclass
@@ -34,6 +36,51 @@ DEFAULT_DATASET_URI = (
 DEFAULT_OUTPUT_DIR = Path("data/city_docs")
 DEFAULT_MIN_POPULATION = 50_000
 DEFAULT_FETCH_BATCH = 10_000
+
+LOCAL_DATASET_DIR = Path("data/overture_sample")
+LOCAL_DATASET_B64_PATH = LOCAL_DATASET_DIR / "divisions_sample.parquet.b64"
+LOCAL_DATASET_FILENAME = "divisions_sample.parquet"
+
+
+def ensure_local_sample_dataset() -> Optional[Path]:
+    """Materialise the bundled sample dataset if the parquet file is missing."""
+
+    parquet_path = LOCAL_DATASET_DIR / LOCAL_DATASET_FILENAME
+    if parquet_path.exists():
+        return parquet_path
+
+    if not LOCAL_DATASET_B64_PATH.exists():
+        LOGGER.warning(
+            "Local sample dataset unavailable; expected to find %s.",
+            LOCAL_DATASET_B64_PATH,
+        )
+        return None
+
+    try:
+        encoded = LOCAL_DATASET_B64_PATH.read_text()
+        decoded = base64.b64decode(encoded)
+    except Exception as exc:  # pragma: no cover - defensive
+        LOGGER.warning(
+            "Failed to decode bundled sample dataset from %s: %s",
+            LOCAL_DATASET_B64_PATH,
+            exc,
+        )
+        return None
+
+    try:
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        parquet_path.write_bytes(decoded)
+    except OSError as exc:  # pragma: no cover - filesystem dependent
+        LOGGER.warning(
+            "Unable to write local sample dataset to %s: %s",
+            parquet_path,
+            exc,
+        )
+        return None
+
+    LOGGER.info("Materialised bundled local sample dataset at %s", parquet_path)
+    return parquet_path
+
 
 PREFERRED_LANGUAGE_KEYS = ("primary", "en", "und", "default")
 
@@ -107,29 +154,126 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def configure_duckdb(conn: duckdb.DuckDBPyConnection) -> None:
-    """Install extensions and configure DuckDB for anonymous S3 access."""
+def configure_duckdb(conn: duckdb.DuckDBPyConnection) -> Tuple[bool, bool]:
+    """Install extensions and configure DuckDB for anonymous S3 access.
 
-    conn.execute("INSTALL httpfs")
-    conn.execute("LOAD httpfs")
-    conn.execute("INSTALL spatial")
-    conn.execute("LOAD spatial")
+    Returns:
+        Tuple[bool, bool]: ``(spatial_available, httpfs_available)`` reflecting
+        whether the optional extensions could be loaded. Offline environments
+        may lack both extensions, in which case the script will rely on local
+        parquet files that already include latitude/longitude columns.
+    """
 
-    conn.execute("SET s3_region='us-west-2'")
-    conn.execute("SET s3_access_key_id=''")
-    conn.execute("SET s3_secret_access_key=''")
-    conn.execute("SET s3_session_token=''")
-    conn.execute("SET s3_endpoint='s3.amazonaws.com'")
-    conn.execute("SET s3_url_style='path'")
-    conn.execute("SET s3_use_ssl=true")
+    httpfs_available = True
+    try:
+        conn.execute("INSTALL httpfs")
+        conn.execute("LOAD httpfs")
+    except duckdb.Error as exc:  # pragma: no cover - depends on environment
+        httpfs_available = False
+        LOGGER.warning(
+            "DuckDB httpfs extension unavailable; S3 access will be skipped. (%s)",
+            exc,
+        )
+
+    spatial_available = True
+    try:
+        conn.execute("INSTALL spatial")
+        conn.execute("LOAD spatial")
+    except duckdb.Error as exc:  # pragma: no cover - depends on environment
+        spatial_available = False
+        LOGGER.warning(
+            "DuckDB spatial extension unavailable; falling back to datasets "
+            "that include explicit latitude/longitude columns. (%s)",
+            exc,
+        )
+
+    if httpfs_available:
+        conn.execute("SET s3_region='us-west-2'")
+        conn.execute("SET s3_access_key_id=''")
+        conn.execute("SET s3_secret_access_key=''")
+        conn.execute("SET s3_session_token=''")
+        conn.execute("SET s3_endpoint='s3.amazonaws.com'")
+        conn.execute("SET s3_url_style='path'")
+        conn.execute("SET s3_use_ssl=true")
+
+    return spatial_available, httpfs_available
+
+
+def resolve_dataset_uri(dataset_uri: str) -> str:
+    """Resolve the dataset URI, considering environment overrides and fallbacks."""
+
+    env_uri = os.environ.get("OVERTURE_DIVISIONS_DATASET_URI")
+    if env_uri:
+        LOGGER.info("Using dataset URI from $OVERTURE_DIVISIONS_DATASET_URI: %s", env_uri)
+        return env_uri
+
+    if dataset_uri == DEFAULT_DATASET_URI:
+        local_dataset = ensure_local_sample_dataset()
+        if local_dataset:
+            local_uri = str(local_dataset)
+            LOGGER.info(
+                "Using bundled local sample dataset instead of the default S3 URI: %s",
+                local_uri,
+            )
+            return local_uri
+
+    return dataset_uri
+
+
+def determine_coordinate_expressions(
+    available_columns: Sequence[str], spatial_available: bool
+) -> Tuple[str, str]:
+    """Return SQL expressions used to extract latitude and longitude."""
+
+    column_lookup = {column.lower(): column for column in available_columns}
+
+    if "geometry" in column_lookup:
+        if not spatial_available:
+            raise RuntimeError(
+                "The dataset provides a geometry column but DuckDB's spatial "
+                "extension is unavailable."
+            )
+        return (
+            "ST_Y(ST_PointOnSurface(geometry))",
+            "ST_X(ST_PointOnSurface(geometry))",
+        )
+
+    coordinate_pairs = [
+        ("lat", "lon"),
+        ("latitude", "longitude"),
+        ("y", "x"),
+    ]
+    for lat_key, lon_key in coordinate_pairs:
+        if lat_key in column_lookup and lon_key in column_lookup:
+            return (column_lookup[lat_key], column_lookup[lon_key])
+
+    raise RuntimeError(
+        "The dataset does not include geometry or explicit latitude/longitude columns."
+    )
 
 
 def query_localities(
     conn: duckdb.DuckDBPyConnection,
     dataset_uri: str,
     fetch_batch: int,
+    spatial_available: bool,
 ) -> Iterator[Dict[str, Any]]:
     """Stream locality rows from the divisions dataset."""
+
+    try:
+        preview_cursor = conn.execute(
+            f"SELECT * FROM read_parquet('{dataset_uri}') LIMIT 0"
+        )
+    except duckdb.IOException as exc:
+        raise RuntimeError(
+            "DuckDB could not find any parquet files matching the dataset URI "
+            f"{dataset_uri!r}. If you are using the public Overture bucket, "
+            "double-check the release path and ensure outbound network access "
+            "is available."
+        ) from exc
+
+    column_names = [description[0] for description in preview_cursor.description]
+    lat_expr, lon_expr = determine_coordinate_expressions(column_names, spatial_available)
 
     sql = f"""
         SELECT
@@ -138,21 +282,12 @@ def query_localities(
             population,
             local_type,
             names,
-            ST_Y(ST_PointOnSurface(geometry)) AS lat,
-            ST_X(ST_PointOnSurface(geometry)) AS lon
+            {lat_expr} AS lat,
+            {lon_expr} AS lon
         FROM read_parquet('{dataset_uri}')
         WHERE subtype = 'locality'
     """
 
-    try:
-        cursor = conn.execute(sql)
-    except duckdb.IOException as exc:
-        raise RuntimeError(
-            "DuckDB could not find any parquet files matching the dataset URI "
-            f"{dataset_uri!r}. If you are using the public Overture bucket, "
-            "double-check the release path and ensure outbound network access "
-            "is available."
-        ) from exc
     cursor = conn.execute(sql)
     columns = [desc[0] for desc in cursor.description]
 
@@ -273,13 +408,24 @@ def write_city_doc(city: CityDoc, output_dir: Path) -> Path:
 
 def build_city_docs(args: argparse.Namespace) -> Tuple[int, int]:
     conn = duckdb.connect()
-    configure_duckdb(conn)
+    spatial_available, httpfs_available = configure_duckdb(conn)
 
     created = 0
     errors = 0
 
+    dataset_uri = resolve_dataset_uri(args.dataset_uri)
+
+    if dataset_uri.startswith("s3://") and not httpfs_available:
+        raise RuntimeError(
+            "DuckDB httpfs extension is unavailable, so S3 URIs cannot be read. "
+            "Provide a local parquet dataset via --dataset-uri or set the "
+            "$OVERTURE_DIVISIONS_DATASET_URI environment variable."
+        )
+
     try:
-        for record in query_localities(conn, args.dataset_uri, args.fetch_batch):
+        for record in query_localities(
+            conn, dataset_uri, args.fetch_batch, spatial_available
+        ):
             try:
                 local_type = normalise_local_type(record.get("local_type"))
                 population = parse_population(record.get("population"))
@@ -339,7 +485,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOGGER.error("%s", exc)
         LOGGER.debug("Dataset resolution failure", exc_info=True)
         return 1
-    created, errors = build_city_docs(args)
     LOGGER.info("City-level docs complete: created=%s, errors=%s", created, errors)
     return 0 if errors == 0 else 1
 

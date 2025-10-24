@@ -27,6 +27,7 @@ data/benchmark/*
 docs/cities
 docs/cities_new
 docs/cities_only
+data/overture_sample/*.parquet
 semantic_dataset_overture
 semantic_dataset_osm_overture_google_cost_down
 semantic_dataset_osm_overture_google
