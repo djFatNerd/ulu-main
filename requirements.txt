@@ -4,3 +4,7 @@ Pillow>=9.0
 shapely>=2.0
 tqdm>=4.0
 googlemaps>=4.10
+overturemaps
+duckdb
+pandas
+boto3

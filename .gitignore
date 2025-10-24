@@ -22,3 +22,14 @@ temp_files/*
 *.editorconfig
 *.vscode
 data/benchmark/*
+docs/cities
+docs/cities_new
+docs/cities_only
+semantic_dataset_overture
+semantic_dataset_osm_overture_google_cost_down
+semantic_dataset_osm_overture_google
+semantic_dataset_osm_overture_full
+semantic_dataset_osm
+times_square
+times_square_free
+times_square_large
