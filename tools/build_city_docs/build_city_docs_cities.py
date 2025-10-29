@@ -108,6 +108,28 @@ CITY_LOCAL_TYPE_EXCLUDED = {"city_section", "city_district", "city_township"}
 # "locality:capital_city".  Treat these as city scale as well.
 CITY_LOCAL_TYPE_SUFFIXES = ("/city", ":city", "_city")
 
+# ``local_type`` identifiers that clearly represent non-city administrative
+# divisions.  These values can legitimately have large populations, so relying
+# solely on population thresholds would incorrectly classify them as cities.
+# The identifiers are compared in lower case after normalisation and only apply
+# when the value is not already covered by ``CITY_LOCAL_TYPE_VALUES``.
+NON_CITY_LOCAL_TYPE_KEYWORDS = {
+    "province",
+    "state",
+    "region",
+    "county",
+    "prefecture",
+    "department",
+    "territory",
+    "governorate",
+    "parish",
+    "oblast",
+    "canton",
+    "division",
+    "municipal_district",
+    "island",
+}
+
 
 @dataclass
 class CityDoc:
@@ -521,17 +543,20 @@ def is_city(local_type: Optional[str], population: Optional[int], min_population
         if local_type in CITY_LOCAL_TYPE_VALUES:
             return True
         if local_type in CITY_LOCAL_TYPE_EXCLUDED:
-            pass
-        else:
-            if any(local_type.endswith(suffix) for suffix in CITY_LOCAL_TYPE_SUFFIXES):
-                return True
-            if "city" in local_type and local_type not in CITY_LOCAL_TYPE_EXCLUDED:
-                return True
-            if local_type.startswith("capital"):
-                return True
-    if population and population >= min_population:
-        return True
-    return False
+            return False
+        if any(local_type.endswith(suffix) for suffix in CITY_LOCAL_TYPE_SUFFIXES):
+            return True
+        if "city" in local_type:
+            return True
+        if local_type.startswith("capital"):
+            return True
+        # If the local type explicitly references a higher-level administrative
+        # division (for example ``province`` or ``region``) treat it as a
+        # non-city feature even when a large population is reported.
+        for keyword in NON_CITY_LOCAL_TYPE_KEYWORDS:
+            if keyword in local_type:
+                return False
+    return bool(population and population >= min_population)
 
 
 def sanitise_identifier(value: str) -> str:
