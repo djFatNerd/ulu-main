@@ -7,8 +7,9 @@ collection in JSON format for convenient downstream consumption.
 """
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
 import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import List
 
 
@@ -136,9 +137,18 @@ def export_city_boundaries() -> List[dict]:
 
 
 def main() -> None:
-    """Print the city boundary collection as formatted JSON."""
+    """Persist the city boundary collection to ``docs/cities/cities.jsonl``."""
 
-    print(json.dumps(export_city_boundaries(), indent=2))
+    repo_root = Path(__file__).resolve().parents[2]
+    output_dir = repo_root / "docs" / "cities"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    output_path = output_dir / "cities.jsonl"
+    with output_path.open("w", encoding="utf-8") as file:
+        for city in export_city_boundaries():
+            file.write(json.dumps(city, ensure_ascii=False) + "\n")
+
+    print(f"Wrote {output_path.relative_to(repo_root)}")
 
 
 if __name__ == "__main__":
