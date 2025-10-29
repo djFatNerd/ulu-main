@@ -50,7 +50,9 @@ Each shell script in `scripts/` accepts the same positional arguments:
 Environment overrides shared across scripts include `MATCH_DISTANCE`,
 `PROVIDER_RADIUS`, `REQUEST_SLEEP`, `LOG_LEVEL`, `OVERPASS_URL`, and
 `FALLBACK_OVERPASS`. Provider-specific options (e.g. `OVERTURE_THEME`,
-`OVERTURE_CACHE_DIR`) are passed through to the underlying tooling.
+`OVERTURE_CACHE_DIR`) are passed through to the underlying tooling. Tune network
+budgets with `OVERTURE_TIMEOUT_S` (default 300 seconds) and
+`PER_CITY_TIMEOUT_S` (default 1800 seconds for the batch runner).
 
 ### Mode quick reference
 
@@ -77,6 +79,11 @@ recommended combinations.
 
 # OSM + Overture with full raw payloads and minimal filtering
 ./scripts/run_osm_overture_full.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_full
+
+# Explicit tiling + gzip cache for large cities
+python tools/multisource/generate_semantic_dataset_osm_overture_full.py \
+  40.7580 -73.9855 2000 \
+  --tile 2x2 --tile-buffer-m 30 --gzip-cache
 
 # Full Google enrichment (all fields)
 GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh 40.7580 -73.9855 1000 1.0 ./semantic_dataset_osm_overture_google
@@ -113,6 +120,9 @@ location or the number of cities to run:
   --resolution 1.0 \
   --output-root data \
   --cities-file docs/cities/cities.jsonl
+
+# Python batch runner with four worker threads and retry logging
+python scripts/run_osm_overture_full_batch.py --threads 4 --retries 2
 ```
 
 Re-run the script with `--force` to refresh cities that were previously marked
