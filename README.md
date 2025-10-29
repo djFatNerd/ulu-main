@@ -86,6 +86,37 @@ GOOGLE_MAPS_API_KEY=... ./scripts/run_osm_overture_google.sh --cost-down 40.7580
   ./semantic_dataset_osm_overture_google_cost_down
 ```
 
+### Batch processing multiple cities
+
+Use `./scripts/run_osm_overture_full_batch.sh` to iterate over a list of target
+cities stored in `docs/cities/cities.jsonl`. On Windows, run the command from a
+shell that provides `bash` (for example Git Bash or WSL) so the underlying
+workflow script can execute. The helper script automatically:
+
+- Loads each city's latitude/longitude from the JSONL file (one JSON object per
+  line).
+- Places the resulting datasets under `data/<city name>/`.
+- Resumes cleanly by skipping folders that already contain a `.completed`
+  marker.
+- Displays a `tqdm` progress bar with the total number of cities to process.
+
+Default parameters match the request for a 2 km radius (`--radius 2000`) and
+0.5 m resolution (`--resolution 0.5`). Override them along with the output
+location or the number of cities to run:
+
+```bash
+# Process the first 5 cities at 3 km radius and 1 m resolution
+./scripts/run_osm_overture_full_batch.sh \
+  --max-cities 5 \
+  --radius 3000 \
+  --resolution 1.0 \
+  --output-root data \
+  --cities-file docs/cities/cities.jsonl
+```
+
+Re-run the script with `--force` to refresh cities that were previously marked
+as completed.
+
 **Google cost-down mode** now layers Google Place Details on top of the free OSM
 and Overture downloads, then minimises paid API usage by only requesting
 additional details for uncertain buildings. Tune its behaviour via environment
