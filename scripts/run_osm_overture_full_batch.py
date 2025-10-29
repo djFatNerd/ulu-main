@@ -4,8 +4,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
+import random
 import subprocess
 import sys
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -13,11 +20,27 @@ from typing import List, Optional
 from tqdm import tqdm
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 @dataclass
 class City:
     name: str
     latitude: float
     longitude: float
+    radius: Optional[float] = None
+    resolution: Optional[float] = None
+
+
+@dataclass
+class CityResult:
+    city: City
+    status: str
+    changed: bool
+    message: str = ""
+
+
+PER_CITY_TIMEOUT_S = int(os.getenv("PER_CITY_TIMEOUT_S", "1800"))
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -61,6 +84,41 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Re-run cities even if they were previously completed.",
     )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of parallel worker threads (default: 1)",
+    )
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=1,
+        help="Retry attempts per city after failure (default: 1)",
+    )
+    parser.add_argument(
+        "--retry-base-delay",
+        type=float,
+        default=5.0,
+        help="Initial delay in seconds before retrying a failed city (exponential backoff)",
+    )
+    parser.add_argument(
+        "--large-city-radius-threshold",
+        type=float,
+        default=4000.0,
+        help="Radius in metres considered a 'large' city for concurrency throttling",
+    )
+    parser.add_argument(
+        "--large-city-max-workers",
+        type=int,
+        default=2,
+        help="Maximum concurrent workers allowed for large cities",
+    )
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        help="Logging level for the batch runner (default: INFO)",
+    )
     return parser.parse_args(argv)
 
 
@@ -92,13 +150,23 @@ def load_cities(path: Path, limit: Optional[int]) -> List[City]:
                 if payload.get("longitude") is not None
                 else payload.get("lon")
             )
+            radius = payload.get("radius") or payload.get("radius_m")
+            resolution = payload.get("resolution") or payload.get("resolution_m")
 
             if name is None or lat is None or lon is None:
                 raise ValueError(
                     "Each JSON object must contain 'name', 'latitude', and 'longitude' fields"
                 )
 
-            cities.append(City(name=str(name), latitude=float(lat), longitude=float(lon)))
+            cities.append(
+                City(
+                    name=str(name),
+                    latitude=float(lat),
+                    longitude=float(lon),
+                    radius=float(radius) if radius is not None else None,
+                    resolution=float(resolution) if resolution is not None else None,
+                )
+            )
 
             if limit is not None and len(cities) >= limit:
                 break
@@ -148,14 +216,73 @@ def run_city(
         str(city_output_dir),
     ]
 
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, timeout=PER_CITY_TIMEOUT_S)
 
     marker.write_text("completed", encoding="utf-8")
     return True
 
 
+def execute_city(
+    run_script: Path,
+    city: City,
+    output_root: Path,
+    radius: float,
+    resolution: float,
+    force: bool,
+    retries: int,
+    retry_base_delay: float,
+    failed_path: Path,
+    failed_lock: threading.Lock,
+) -> CityResult:
+    attempts = 0
+    total_attempts = max(0, retries) + 1
+    last_message = ""
+    while attempts < total_attempts:
+        try:
+            changed = run_city(
+                run_script=run_script,
+                city=city,
+                output_root=output_root,
+                radius=radius,
+                resolution=resolution,
+                force=force,
+            )
+        except subprocess.TimeoutExpired:
+            last_message = f"timeout after {PER_CITY_TIMEOUT_S}s"
+            LOGGER.warning("City %s timed out after %ss", city.name, PER_CITY_TIMEOUT_S)
+        except subprocess.CalledProcessError as err:
+            last_message = f"exit code {err.returncode}"
+            LOGGER.warning("City %s failed with exit code %s", city.name, err.returncode)
+        else:
+            status = "success" if changed else "skipped"
+            return CityResult(city=city, status=status, changed=changed)
+        attempts += 1
+        if attempts < total_attempts:
+            backoff = retry_base_delay * (2 ** (attempts - 1))
+            jitter = random.uniform(0.7, 1.3)
+            delay = backoff * jitter
+            LOGGER.info(
+                "Retrying city %s in %.1fs (attempt %d/%d)",
+                city.name,
+                delay,
+                attempts + 1,
+                total_attempts,
+            )
+            time.sleep(delay)
+    with failed_lock:
+        failed_path.parent.mkdir(parents=True, exist_ok=True)
+        with failed_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"{city.name}\t{last_message or 'failed'}\n")
+    return CityResult(city=city, status="failed", changed=False, message=last_message)
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     args = parse_args(argv)
+    logging.basicConfig(
+        level=getattr(logging, args.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    LOGGER.debug("Batch arguments: %s", args)
     repo_root = Path(__file__).resolve().parents[1]
     run_script = repo_root / "scripts" / "run_osm_overture_full.sh"
 
@@ -177,33 +304,76 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     cities = load_cities(cities_file, args.max_cities)
 
+    failed_path = output_root / "failed.txt"
+    if failed_path.exists():
+        failed_path.unlink()
+    failed_lock = threading.Lock()
+    large_city_threshold = max(0.0, args.large_city_radius_threshold)
+    large_city_limit = max(1, args.large_city_max_workers)
+    large_city_semaphore = threading.Semaphore(large_city_limit)
+    max_workers = max(1, args.threads)
+    retries = max(0, args.retries)
+    retry_base_delay = max(0.0, args.retry_base_delay)
+
+    def worker(city: City) -> CityResult:
+        city_radius = city.radius if city.radius is not None else args.radius
+        city_resolution = city.resolution if city.resolution is not None else args.resolution
+        context = (
+            large_city_semaphore
+            if city_radius >= large_city_threshold
+            else nullcontext()
+        )
+        with context:
+            return execute_city(
+                run_script=run_script,
+                city=city,
+                output_root=output_root,
+                radius=city_radius,
+                resolution=city_resolution,
+                force=args.force,
+                retries=retries,
+                retry_base_delay=retry_base_delay,
+                failed_path=failed_path,
+                failed_lock=failed_lock,
+            )
+
     processed = 0
     skipped = 0
-    with tqdm(total=len(cities), unit="city", desc="Cities") as progress:
-        for city in cities:
-            try:
-                changed = run_city(
-                    run_script=run_script,
-                    city=city,
-                    output_root=output_root,
-                    radius=args.radius,
-                    resolution=args.resolution,
-                    force=args.force,
-                )
-            except subprocess.CalledProcessError as err:
-                tqdm.write(
-                    f"Error while processing {city.name}: {err}. Resume will skip completed cities."
-                )
-                raise
-            else:
-                if changed:
-                    processed += 1
-                else:
-                    skipped += 1
-            progress.update(1)
-            progress.set_postfix(processed=processed, skipped=skipped)
+    failed = 0
 
-    return 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor, tqdm(
+        total=len(cities), unit="city", desc="Cities"
+    ) as progress:
+        future_map = {executor.submit(worker, city): city for city in cities}
+        for future in as_completed(future_map):
+            city = future_map[future]
+            try:
+                result = future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                LOGGER.exception("Unexpected error while processing %s", city.name)
+                with failed_lock:
+                    failed_path.parent.mkdir(parents=True, exist_ok=True)
+                    with failed_path.open("a", encoding="utf-8") as fh:
+                        fh.write(f"{city.name}\t{exc}\n")
+                result = CityResult(city=city, status="failed", changed=False, message=str(exc))
+            if result.status == "success":
+                processed += 1
+            elif result.status == "skipped":
+                skipped += 1
+            else:
+                failed += 1
+                tqdm.write(f"City {result.city.name} failed: {result.message or 'see logs'}")
+            progress.update(1)
+            progress.set_postfix(processed=processed, skipped=skipped, failed=failed)
+
+    if failed:
+        LOGGER.warning(
+            "Completed batch with %d failure(s). See %s for details.", failed, failed_path
+        )
+    else:
+        LOGGER.info("Completed batch successfully: %d processed, %d skipped", processed, skipped)
+
+    return 0 if failed == 0 else 1
 
 
 if __name__ == "__main__":

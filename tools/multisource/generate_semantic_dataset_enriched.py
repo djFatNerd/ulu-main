@@ -9,13 +9,16 @@ import json
 import logging
 import math
 import os
+import random
 import re
 import subprocess
+import tempfile
 import time
+import gzip
 from dataclasses import dataclass, field
 from hashlib import md5
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, TypeVar
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -30,6 +33,11 @@ from shapely.geometry import Point, box, shape
 from shapely.strtree import STRtree
 
 import sys
+
+try:
+    import ijson  # type: ignore
+except ImportError:  # pragma: no cover - optional dependency
+    ijson = None  # type: ignore
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_FREE_GEOJSON = ROOT_DIR / "data" / "open" / "community_pois.geojson"
@@ -54,6 +62,15 @@ from tools.osm import (
 )
 
 LOGGER = logging.getLogger(__name__)
+
+
+OVERTURE_TIMEOUT_S = int(os.getenv("OVERTURE_TIMEOUT_S", "300"))
+DEFAULT_MAX_CACHE_MB = 200
+DEFAULT_STREAM_THRESHOLD_MB = 64
+DEFAULT_TILE_AREA_THRESHOLD_M2 = 5_000_000.0
+DEFAULT_TILE_FEATURE_THRESHOLD = 5000
+
+T = TypeVar("T")
 
 
 DEFAULT_CONNECT_TIMEOUT = 10
@@ -197,6 +214,148 @@ class ProviderBase:
 
     def close(self) -> None:  # pragma: no cover - hook for future resources
         return None
+
+
+def _retry(func: Callable[[], T], tries: int = 3, base_delay: float = 2.0) -> T:
+    """Retry *func* with exponential backoff and jitter."""
+
+    attempts = max(1, tries)
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as exc:  # pragma: no cover - defensive
+            last_exc = exc
+            if attempt >= attempts:
+                break
+            delay = base_delay * (2 ** (attempt - 1))
+            jitter = random.uniform(0.7, 1.3)
+            time.sleep(delay * jitter)
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("_retry exhausted without executing function")
+
+
+def _tiles_for_bbox(
+    bbox: Tuple[float, float, float, float],
+    nx: int = 2,
+    ny: int = 2,
+    buffer_lat_deg: float = 0.0,
+    buffer_lon_deg: Optional[float] = None,
+) -> List[Tuple[float, float, float, float]]:
+    """Split *bbox* into *nx* by *ny* tiles with an optional buffer."""
+
+    if nx <= 1 and ny <= 1:
+        return [bbox]
+    west, south, east, north = bbox
+    nx = max(1, nx)
+    ny = max(1, ny)
+    lon_buffer = buffer_lon_deg if buffer_lon_deg is not None else buffer_lat_deg
+    tile_width = (east - west) / nx if nx > 0 else (east - west)
+    tile_height = (north - south) / ny if ny > 0 else (north - south)
+    tiles: List[Tuple[float, float, float, float]] = []
+    for ix in range(nx):
+        base_west = west + ix * tile_width
+        base_east = base_west + tile_width
+        for iy in range(ny):
+            base_south = south + iy * tile_height
+            base_north = base_south + tile_height
+            tiles.append(
+                (
+                    base_west - lon_buffer,
+                    base_south - buffer_lat_deg,
+                    base_east + lon_buffer,
+                    base_north + buffer_lat_deg,
+                )
+            )
+    return tiles
+
+
+def _write_cached_payload(
+    cache_path: Path,
+    payload: Dict[str, Any],
+    *,
+    compress: bool = True,
+) -> None:
+    """Atomically persist *payload* to *cache_path* (optionally gzipped)."""
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_handle = tempfile.NamedTemporaryFile(dir=cache_path.parent, delete=False)
+    tmp_path = Path(tmp_handle.name)
+    tmp_handle.close()
+    should_compress = compress or cache_path.suffix == ".gz"
+    try:
+        if should_compress:
+            with gzip.open(tmp_path, "wt", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+        else:
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+        os.replace(tmp_path, cache_path)
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _approx_bbox_area_m2(bbox: Tuple[float, float, float, float]) -> float:
+    west, south, east, north = bbox
+    width_deg = max(0.0, east - west)
+    height_deg = max(0.0, north - south)
+    if width_deg == 0 or height_deg == 0:
+        return 0.0
+    centre_lat = (north + south) / 2.0
+    width_m = width_deg * 111320.0 * math.cos(math.radians(centre_lat))
+    height_m = height_deg * 111320.0
+    return max(0.0, width_m * height_m)
+
+
+def _stable_feature_id(feature: Dict[str, Any]) -> str:
+    """Derive a stable identifier for an Overture feature."""
+
+    if not isinstance(feature, dict):
+        return md5(repr(feature).encode("utf-8")).hexdigest()
+    direct_id = feature.get("id")
+    if isinstance(direct_id, (str, int)) and direct_id not in ("", None):
+        return str(direct_id)
+    properties = feature.get("properties")
+    if isinstance(properties, dict):
+        for key in ("stable_id", "stableId", "id", "overture_id", "overtureId"):
+            value = properties.get(key)
+            if isinstance(value, (str, int)) and value not in ("", None):
+                return str(value)
+        source = properties.get("source")
+        source_id = properties.get("source_id") or properties.get("sourceId")
+        if source_id and source:
+            return f"{source}:{source_id}"
+        ids = properties.get("ids")
+        if isinstance(ids, list):
+            for entry in ids:
+                if not isinstance(entry, dict):
+                    continue
+                authority = entry.get("authority") or entry.get("source")
+                identifier = entry.get("id") or entry.get("value")
+                if identifier:
+                    if authority:
+                        return f"{authority}:{identifier}"
+                    return str(identifier)
+    geometry = feature.get("geometry")
+    geometry_blob = json.dumps(geometry, sort_keys=True, ensure_ascii=False)
+    props_blob = json.dumps(properties or {}, sort_keys=True, ensure_ascii=False)
+    return md5(f"{geometry_blob}|{props_blob}".encode("utf-8")).hexdigest()
+
+
+def _deduplicate_features(features: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    seen: Dict[str, Dict[str, Any]] = {}
+    ordered: List[Dict[str, Any]] = []
+    for feature in features:
+        key = _stable_feature_id(feature)
+        if key not in seen:
+            seen[key] = feature
+            ordered.append(feature)
+    return ordered
 
 
 def _normalize_tokens(value: Any) -> List[str]:
@@ -534,6 +693,12 @@ class OvertureBuildingsProvider(ProviderBase):
         auth_token: Optional[str] = None,
         proxy: Optional[str] = None,
         cache_only: bool = False,
+        tile_config: Optional[Tuple[int, int]] = None,
+        tile_buffer_m: float = 30.0,
+        max_cache_mb: float = DEFAULT_MAX_CACHE_MB,
+        gzip_cache: bool = True,
+        stream_threshold_mb: float = DEFAULT_STREAM_THRESHOLD_MB,
+        cli_timeout_s: Optional[int] = None,
     ) -> None:
         del auth_token  # legacy parameter retained for CLI compatibility
         del proxy
@@ -555,6 +720,24 @@ class OvertureBuildingsProvider(ProviderBase):
         self._cache_only = cache_only
         self._cache_dir = Path(cache_dir)
         self._cache_dir.mkdir(parents=True, exist_ok=True)
+        if tile_config:
+            tx, ty = tile_config
+            self._tile_nx = max(1, int(tx))
+            self._tile_ny = max(1, int(ty))
+        else:
+            self._tile_nx = 1
+            self._tile_ny = 1
+        self._tile_buffer_m = max(0.0, tile_buffer_m)
+        self._max_cache_bytes = int(max(1.0, max_cache_mb) * 1024 * 1024)
+        self._gzip_cache = gzip_cache
+        self._stream_parse_threshold_bytes = int(max(1.0, stream_threshold_mb) * 1024 * 1024)
+        self._cli_timeout_s = cli_timeout_s if cli_timeout_s is not None else OVERTURE_TIMEOUT_S
+        self._tile_area_threshold_m2 = max(
+            DEFAULT_TILE_AREA_THRESHOLD_M2,
+            math.pi * max(self._search_radius_m, 0.0) ** 2,
+        )
+        self._tile_feature_threshold = DEFAULT_TILE_FEATURE_THRESHOLD
+        self._cli_retry_attempts = 3
         self._dataset_type = self._derive_dataset_type(theme)
         self._cli_options = self._detect_cli_options()
         self._prefetch_bbox: Optional[Tuple[float, float, float, float]] = None
@@ -595,7 +778,7 @@ class OvertureBuildingsProvider(ProviderBase):
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=self._cli_timeout_s if self._cli_timeout_s > 0 else None,
             )
         except (OSError, subprocess.CalledProcessError) as exc:
             LOGGER.debug("Unable to introspect overturemaps CLI, using defaults: %s", exc)
@@ -734,26 +917,94 @@ class OvertureBuildingsProvider(ProviderBase):
         limit_part = f"limit{self._limit}"
         raw_key = f"{self._theme}_{limit_part}_{include_hash}_{bbox_key}"
         safe_key = re.sub(r"[^A-Za-z0-9_.-]", "_", raw_key)
-        return self._cache_dir / f"{safe_key}.json"
+        suffix = ".json.gz" if self._gzip_cache else ".json"
+        return self._cache_dir / f"{safe_key}{suffix}"
 
     def _read_cached_payload(self, cache_path: Path) -> Optional[Dict[str, Any]]:
-        if not cache_path.exists():
-            return None
-        try:
-            with cache_path.open("r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("Failed to read cached Overture data at %s: %s", cache_path, exc)
+        candidates = [cache_path]
+        if cache_path.suffix == ".gz":
+            candidates.append(cache_path.with_suffix(""))
+        for candidate in candidates:
+            if not candidate.exists():
+                continue
             try:
-                cache_path.unlink()
+                size_bytes = candidate.stat().st_size
             except OSError:
-                pass
-            return None
-        else:
-            LOGGER.debug("Loaded cached Overture data from %s", cache_path)
+                size_bytes = 0
+            size_mb = size_bytes / (1024 * 1024) if size_bytes else 0
+            if self._max_cache_bytes and size_bytes > self._max_cache_bytes:
+                LOGGER.warning(
+                    "Skipping cached Overture payload at %s (%.1f MB exceeds %.1f MB); deleting.",
+                    candidate,
+                    size_mb,
+                    self._max_cache_bytes / (1024 * 1024),
+                )
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                continue
+            try:
+                payload = self._load_json_payload(candidate, size_bytes)
+            except (OSError, json.JSONDecodeError, ValueError) as exc:
+                LOGGER.warning(
+                    "Failed to parse cached Overture payload at %s: %s. Removing corrupt cache.",
+                    candidate,
+                    exc,
+                )
+                try:
+                    candidate.unlink()
+                except OSError:
+                    pass
+                continue
+            LOGGER.info("Overture cache hit at %s (%.1f MB)", candidate, size_mb)
+            if candidate != cache_path and self._gzip_cache and cache_path.suffix == ".gz":
+                try:
+                    _write_cached_payload(cache_path, payload, compress=True)
+                    try:
+                        candidate.unlink()
+                    except OSError:
+                        pass
+                    LOGGER.debug("Rebuilt gzip cache at %s from legacy file %s", cache_path, candidate)
+                except Exception as exc:  # pragma: no cover - defensive
+                    LOGGER.debug("Unable to rewrite cache %s: %s", cache_path, exc)
             return payload
+        return None
 
-    def _build_cli_command_variants(self, bbox: str, tmp_path: Path) -> List[List[str]]:
+    def _load_json_payload(self, path: Path, size_bytes: int) -> Dict[str, Any]:
+        use_stream = bool(
+            ijson is not None
+            and size_bytes >= self._stream_parse_threshold_bytes
+        )
+        open_func: Callable[..., Any]
+        if path.suffix == ".gz":
+            open_func = lambda p, mode: gzip.open(p, mode, encoding="utf-8")  # type: ignore[arg-type]
+        else:
+            open_func = lambda p, mode: open(p, mode, encoding="utf-8")
+        if not use_stream:
+            with open_func(path, "rt") as handle:  # type: ignore[misc]
+                return json.load(handle)
+        LOGGER.debug(
+            "Streaming parse for %s (%.1f MB, threshold %.1f MB)",
+            path,
+            size_bytes / (1024 * 1024),
+            self._stream_parse_threshold_bytes / (1024 * 1024),
+        )
+        with open_func(path, "rt") as handle:  # type: ignore[misc]
+            features = list(ijson.items(handle, "features.item"))  # type: ignore[arg-type]
+        metadata: Dict[str, Any] = {}
+        with open_func(path, "rt") as handle:  # type: ignore[misc]
+            for key, value in ijson.kvitems(handle, ""):  # type: ignore[arg-type]
+                if key == "features":
+                    continue
+                metadata[key] = value
+        metadata.setdefault("type", "FeatureCollection")
+        metadata["features"] = features
+        return metadata
+
+    def _build_cli_command_variants(
+        self, bbox: str, tmp_path: Path, cursor: Optional[str] = None
+    ) -> List[List[str]]:
         """Construct a set of overturemaps CLI invocations to try."""
 
         commands: List[List[str]] = []
@@ -817,40 +1068,62 @@ class OvertureBuildingsProvider(ProviderBase):
 
         theme_modes = ["space", "equals"]
         format_flag = self._cli_options.format_flag
+        cursor_options: List[Optional[Tuple[str, str]]] = [None]
+        if cursor:
+            cursor_flags: List[str] = []
+            for flag in ["--cursor", "--next", "--after", "--page-token", "--pagetoken"]:
+                lower_flag = flag.lower()
+                if (
+                    not available_flags
+                    or lower_flag in available_flags
+                    or lower_flag == flag.lower() == "--cursor"
+                ):
+                    if lower_flag not in {f.lower() for f in cursor_flags}:
+                        cursor_flags.append(flag)
+            if cursor_flags:
+                cursor_options = [(flag, cursor) for flag in cursor_flags]
+            else:
+                LOGGER.debug(
+                    "Pagination cursor provided but overture CLI did not advertise a compatible flag"
+                )
 
         for bbox_flag in bbox_flag_candidates:
             for bbox_mode in bbox_modes:
                 for theme_flag, theme_value in theme_candidates:
                     for theme_mode in theme_modes:
                         for limit_option in limit_candidates:
-                            cmd: List[str] = [
-                                sys.executable,
-                                "-m",
-                                "overturemaps.cli",
-                                "download",
-                            ]
-                            if bbox_mode == "equals":
-                                cmd.append(f"{bbox_flag}={bbox}")
-                            elif bbox_mode == "comma":
-                                cmd.extend([bbox_flag, bbox])
-                            else:
-                                if len(bbox_parts) != 4:
-                                    continue
-                                cmd.append(bbox_flag)
-                                cmd.extend(bbox_parts)
-                            cmd.extend([format_flag, "geojson"])
-                            if theme_mode == "equals":
-                                cmd.append(f"{theme_flag}={theme_value}")
-                            else:
-                                cmd.extend([theme_flag, theme_value])
-                            if limit_option:
-                                limit_flag, limit_value = limit_option
-                                cmd.extend([limit_flag, limit_value])
-                            cmd.extend(["-o", str(tmp_path)])
-                            key = tuple(cmd)
-                            if key not in seen:
-                                seen.add(key)
-                                commands.append(cmd)
+                            for cursor_option in cursor_options:
+                                cmd: List[str] = [
+                                    sys.executable,
+                                    "-m",
+                                    "overturemaps.cli",
+                                    "download",
+                                ]
+                                if bbox_mode == "equals":
+                                    cmd.append(f"{bbox_flag}={bbox}")
+                                elif bbox_mode == "comma":
+                                    cmd.extend([bbox_flag, bbox])
+                                else:
+                                    if len(bbox_parts) != 4:
+                                        continue
+                                    cmd.append(bbox_flag)
+                                    cmd.extend(bbox_parts)
+                                cmd.extend([format_flag, "geojson"])
+                                if theme_mode == "equals":
+                                    cmd.append(f"{theme_flag}={theme_value}")
+                                else:
+                                    cmd.extend([theme_flag, theme_value])
+                                if limit_option:
+                                    limit_flag, limit_value = limit_option
+                                    cmd.extend([limit_flag, limit_value])
+                                if cursor_option:
+                                    cursor_flag, cursor_value = cursor_option
+                                    cmd.extend([cursor_flag, cursor_value])
+                                cmd.extend(["-o", str(tmp_path)])
+                                key = tuple(cmd)
+                                if key not in seen:
+                                    seen.add(key)
+                                    commands.append(cmd)
 
         if not commands:
             fallback_cmd = [
@@ -872,72 +1145,74 @@ class OvertureBuildingsProvider(ProviderBase):
 
         return commands
 
-    def _download_payload(self, bbox: str, cache_path: Path) -> None:
-        tmp_path = cache_path.with_suffix(".tmp")
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
+    def _run_cli_attempt(self, bbox: str, cursor: Optional[str] = None) -> Dict[str, Any]:
+        tmp_handle = tempfile.NamedTemporaryFile(dir=self._cache_dir, suffix=".geojson", delete=False)
+        tmp_path = Path(tmp_handle.name)
+        tmp_handle.close()
         self._throttle()
         start = time.time()
-        label = cache_path.name
-        commands = self._build_cli_command_variants(bbox, tmp_path)
-        timeout = max(self._timeout, 0) or None
+        commands = self._build_cli_command_variants(bbox, tmp_path, cursor)
+        timeout = self._cli_timeout_s if self._cli_timeout_s > 0 else None
         last_error: Optional[Tuple[subprocess.CalledProcessError, str]] = None
         attempt_count = len(commands)
-        for attempt, cmd in enumerate(commands, start=1):
-            LOGGER.debug(
-                "Running overturemaps CLI (attempt %d/%d): %s",
-                attempt,
-                attempt_count,
-                " ".join(cmd),
-            )
-            try:
-                subprocess.run(
-                    cmd,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
-            except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr.strip() if exc.stderr else ""
-                stdout = exc.stdout.strip() if exc.stdout else ""
-                message = "; ".join(part for part in [stdout, stderr] if part)
-                last_error = (exc, message)
-                fallbackable = (
-                    exc.returncode == 2
-                    or "usage" in message.lower()
-                    or "no such option" in message.lower()
-                    or "missing option" in message.lower()
-                    or "invalid value" in message.lower()
-                )
-                if tmp_path.exists():
-                    try:
-                        tmp_path.unlink()
-                    except OSError:
-                        pass
-                if fallbackable and attempt < attempt_count:
-                    LOGGER.debug(
-                        "Retrying overturemaps CLI with alternate arguments after failure: %s",
-                        message or exc.returncode,
-                    )
-                    continue
-                raise RuntimeError(
-                    f"overturemaps CLI failed for bbox {bbox} (exit {exc.returncode}): {message}"
-                ) from exc
-            except subprocess.TimeoutExpired as exc:
-                raise RuntimeError(
-                    f"overturemaps CLI timed out for bbox {bbox} after {self._timeout} seconds"
-                ) from exc
-            else:
-                duration = time.time() - start
+        try:
+            for attempt, cmd in enumerate(commands, start=1):
                 LOGGER.debug(
-                    "Downloaded Overture data for %s in %.2f seconds via overturemaps CLI", label, duration
+                    "Running overturemaps CLI (attempt %d/%d): %s",
+                    attempt,
+                    attempt_count,
+                    " ".join(cmd),
                 )
-                tmp_path.replace(cache_path)
-                return
+                try:
+                    subprocess.run(
+                        cmd,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                    )
+                except subprocess.CalledProcessError as exc:
+                    stderr = exc.stderr.strip() if exc.stderr else ""
+                    stdout = exc.stdout.strip() if exc.stdout else ""
+                    message = "; ".join(part for part in [stdout, stderr] if part)
+                    last_error = (exc, message)
+                    fallbackable = (
+                        exc.returncode == 2
+                        or "usage" in message.lower()
+                        or "no such option" in message.lower()
+                        or "missing option" in message.lower()
+                        or "invalid value" in message.lower()
+                    )
+                    if fallbackable and attempt < attempt_count:
+                        LOGGER.debug(
+                            "Retrying overturemaps CLI with alternate arguments after failure: %s",
+                            message or exc.returncode,
+                        )
+                        continue
+                    raise RuntimeError(
+                        f"overturemaps CLI failed for bbox {bbox} (exit {exc.returncode}): {message}"
+                    ) from exc
+                except subprocess.TimeoutExpired as exc:
+                    raise RuntimeError(
+                        f"overturemaps CLI timed out for bbox {bbox} after {self._cli_timeout_s} seconds"
+                    ) from exc
+                else:
+                    size_bytes = tmp_path.stat().st_size if tmp_path.exists() else 0
+                    duration = time.time() - start
+                    LOGGER.debug(
+                        "Downloaded Overture data for bbox %s in %.2f seconds via overturemaps CLI (%.1f MB)",
+                        bbox,
+                        duration,
+                        size_bytes / (1024 * 1024) if size_bytes else 0.0,
+                    )
+                    payload = self._load_json_payload(tmp_path, size_bytes)
+                    return payload
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
         if last_error is not None:
             exc, message = last_error
@@ -968,21 +1243,198 @@ class OvertureBuildingsProvider(ProviderBase):
             )
             LOGGER.info("Set OVERTURE_CACHE_DIR to a directory containing pre-downloaded responses.")
             return None
+        bbox_tuple: Optional[Tuple[float, float, float, float]] = None
         try:
-            LOGGER.info("Downloading Overture data for bbox %s via overturemaps", bbox)
-            self._download_payload(bbox, cache_path)
+            parts = [float(part) for part in bbox.split(",")]
+            if len(parts) == 4:
+                bbox_tuple = (parts[0], parts[1], parts[2], parts[3])
+        except ValueError:
+            bbox_tuple = None
+        area_m2 = _approx_bbox_area_m2(bbox_tuple) if bbox_tuple else 0.0
+        use_tiles = bool(
+            bbox_tuple
+            and (self._tile_nx > 1 or self._tile_ny > 1)
+            and (
+                area_m2 >= self._tile_area_threshold_m2
+                or (self._limit and self._limit >= self._tile_feature_threshold)
+            )
+        )
+        LOGGER.debug(
+            "Tile decision for %s: area=%.2f m^2, limit=%s, tiles=%s", bbox, area_m2, self._limit, use_tiles
+        )
+
+        try:
+            if use_tiles and bbox_tuple:
+                payload = self._call_overture_cli_tiled(bbox_tuple)
+            else:
+                payload = self._call_overture_cli_paged(bbox)
         except Exception as exc:
             LOGGER.warning("Unexpected error downloading Overture data near %.6f, %.6f: %s", lat, lon, exc)
             return None
-        payload = self._read_cached_payload(cache_path)
         if payload is None:
-            LOGGER.warning(
-                "Cached Overture data at %s could not be parsed after download near %.6f, %.6f",
-                cache_path,
-                lat,
-                lon,
-            )
+            return None
+        try:
+            _write_cached_payload(cache_path, payload, compress=self._gzip_cache)
+            LOGGER.info("Cached Overture payload written to %s", cache_path)
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Failed to persist Overture payload to %s: %s", cache_path, exc)
         return payload
+
+    def _call_overture_cli_tiled(
+        self, bbox_tuple: Tuple[float, float, float, float]
+    ) -> Dict[str, Any]:
+        west, south, east, north = bbox_tuple
+        avg_lat = (south + north) / 2.0
+        buffer_lat_deg = self._tile_buffer_m / 111320.0 if self._tile_buffer_m else 0.0
+        lon_denom = max(1e-6, 111320.0 * math.cos(math.radians(avg_lat)))
+        buffer_lon_deg = self._tile_buffer_m / lon_denom if self._tile_buffer_m else 0.0
+        tiles = _tiles_for_bbox(
+            bbox_tuple,
+            nx=self._tile_nx,
+            ny=self._tile_ny,
+            buffer_lat_deg=buffer_lat_deg,
+            buffer_lon_deg=buffer_lon_deg,
+        )
+        LOGGER.info(
+            "Fetching Overture data via %dx%d tiling with buffer %.1fm (lat %.6f°, lon %.6f°)",
+            self._tile_nx,
+            self._tile_ny,
+            self._tile_buffer_m,
+            buffer_lat_deg,
+            buffer_lon_deg,
+        )
+        combined_features: List[Dict[str, Any]] = []
+        cumulative_raw = 0
+        template_payload: Dict[str, Any] = {}
+        total_start = time.time()
+        aggregated_links: Optional[Any] = None
+        for index, tile_bbox in enumerate(tiles, start=1):
+            tile_bbox_str = ",".join(f"{value:.6f}" for value in tile_bbox)
+            tile_start = time.time()
+            payload = self._call_overture_cli_paged(tile_bbox_str)
+            if not template_payload:
+                template_payload = payload
+            features = payload.get("features") if isinstance(payload, dict) else None
+            if not isinstance(features, list):
+                features = []
+            combined_features.extend(features)
+            cumulative_raw += len(features)
+            aggregated_links = payload.get("links") if isinstance(payload, dict) else aggregated_links
+            duration = time.time() - tile_start
+            LOGGER.info(
+                "Tile %d/%d bbox %s produced %d features in %.2fs (cumulative raw=%d)",
+                index,
+                len(tiles),
+                tile_bbox_str,
+                len(features),
+                duration,
+                cumulative_raw,
+            )
+        deduplicated = _deduplicate_features(combined_features)
+        LOGGER.info(
+            "Tiled Overture fetch combined %d raw features into %d unique features",
+            cumulative_raw,
+            len(deduplicated),
+        )
+        LOGGER.info(
+            "Tiled fetch total duration %.2fs", time.time() - total_start
+        )
+        result: Dict[str, Any] = {
+            key: value for key, value in template_payload.items() if key != "features"
+        }
+        result["features"] = deduplicated
+        if aggregated_links is not None:
+            result["links"] = aggregated_links
+        result.setdefault("type", "FeatureCollection")
+        result["bbox"] = [west, south, east, north]
+        return result
+
+    def _call_overture_cli_paged(self, bbox: str) -> Dict[str, Any]:
+        total_features = 0
+        aggregated_features: List[Dict[str, Any]] = []
+        aggregated_links: Optional[Any] = None
+        cursor: Optional[str] = None
+        seen_cursors: Set[str] = set()
+        page = 0
+        overall_start = time.time()
+        last_payload: Dict[str, Any] = {}
+        while True:
+            page += 1
+            page_start = time.time()
+            payload = _retry(
+                lambda: self._run_cli_attempt(bbox, cursor),
+                tries=self._cli_retry_attempts,
+            )
+            last_payload = payload
+            features = payload.get("features") if isinstance(payload, dict) else None
+            if not isinstance(features, list):
+                features = []
+            aggregated_features.extend(features)
+            total_features += len(features)
+            duration = time.time() - page_start
+            LOGGER.info(
+                "Overture page %d for %s returned %d features in %.2fs (cumulative=%d)",
+                page,
+                bbox,
+                len(features),
+                duration,
+                total_features,
+            )
+            next_cursor = self._extract_next_cursor(payload)
+            if not next_cursor or next_cursor in seen_cursors:
+                aggregated_links = payload.get("links") if isinstance(payload, dict) else None
+                break
+            LOGGER.debug("Continuing Overture pagination with cursor %s", next_cursor)
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        total_duration = time.time() - overall_start
+        LOGGER.info(
+            "Completed Overture fetch for %s in %.2fs across %d page(s); total features=%d",
+            bbox,
+            total_duration,
+            page,
+            total_features,
+        )
+        result: Dict[str, Any] = {
+            key: value
+            for key, value in (last_payload or {}).items()
+            if key != "features"
+        }
+        result["features"] = aggregated_features
+        if aggregated_links is not None:
+            result["links"] = aggregated_links
+        result.setdefault("type", "FeatureCollection")
+        return result
+
+    def _extract_next_cursor(self, payload: Dict[str, Any]) -> Optional[str]:
+        if not isinstance(payload, dict):
+            return None
+        links = payload.get("links")
+        if isinstance(links, dict):
+            candidate = links.get("next")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+            if isinstance(candidate, dict):
+                href = candidate.get("href") or candidate.get("url")
+                if isinstance(href, str) and href.strip():
+                    return href
+        if isinstance(links, list):
+            for entry in links:
+                if isinstance(entry, dict) and entry.get("rel") == "next":
+                    href = entry.get("href") or entry.get("url")
+                    if isinstance(href, str) and href.strip():
+                        return href
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            candidate = metadata.get("next") or metadata.get("nextCursor")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        properties = payload.get("properties")
+        if isinstance(properties, dict):
+            candidate = properties.get("next") or properties.get("nextCursor")
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate
+        return None
 
     def lookup(self, lat: float, lon: float, feature: Dict[str, Any]) -> Optional[ProviderResult]:
         west, south, east, north = self._bbox_from_radius(lat, lon)

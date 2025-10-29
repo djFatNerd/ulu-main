@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,16 @@ class Stage1Result:
 
 def parse_feature_filter(raw: str) -> Sequence[str]:
     return [token.strip().lower() for token in raw.split(",") if token.strip()]
+
+
+def parse_tile_grid(raw: str) -> Tuple[int, int]:
+    match = re.fullmatch(r"\s*(\d+)x(\d+)\s*", raw)
+    if not match:
+        raise argparse.ArgumentTypeError("--tile must be of the form NxM, e.g. 2x2 or 3x3")
+    nx, ny = int(match.group(1)), int(match.group(2))
+    if nx <= 0 or ny <= 0:
+        raise argparse.ArgumentTypeError("--tile dimensions must be positive integers")
+    return nx, ny
 
 
 def _source_keys(source_tags: Iterable[str]) -> Tuple[set, Dict[str, List[str]]]:
@@ -234,7 +245,45 @@ def parse_args() -> argparse.Namespace:
         nargs="*",
         default=["name", "names.primary", "display.name", "displayName.text"],
     )
-    parser.add_argument("--overture-timeout", type=float, default=20.0)
+    parser.add_argument(
+        "--overture-timeout-s",
+        "--overture-timeout",
+        dest="overture_timeout_s",
+        type=int,
+        default=None,
+        help="Timeout in seconds for overture CLI calls (overrides OVERTURE_TIMEOUT_S env).",
+    )
+    parser.add_argument(
+        "--tile",
+        type=parse_tile_grid,
+        default=parse_tile_grid("2x2"),
+        help="Tile grid for large bbox fetching (e.g. 2x2, 3x3).",
+    )
+    parser.add_argument(
+        "--tile-buffer-m",
+        type=float,
+        default=30.0,
+        help="Buffer in metres added around each tile during Overture fetches (default: 30m)",
+    )
+    parser.add_argument(
+        "--max-cache-mb",
+        type=float,
+        default=200.0,
+        help="Maximum accepted cache size before forcing a refresh (default: 200 MB)",
+    )
+    parser.add_argument(
+        "--gzip-cache",
+        dest="gzip_cache",
+        action="store_true",
+        default=True,
+        help="Store cached Overture payloads as .json.gz (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-gzip-cache",
+        dest="gzip_cache",
+        action="store_false",
+        help="Disable gzip compression for cached Overture payloads",
+    )
     parser.add_argument(
         "--overture-cache-dir",
         type=Path,
@@ -294,9 +343,14 @@ def main() -> None:
             include_fields=args.overture_include_fields,
             category_fields=args.overture_category_fields,
             name_fields=args.overture_name_fields,
-            timeout=args.overture_timeout,
+            timeout=float(args.overture_timeout_s or 0),
             cache_dir=overture_cache_dir,
             cache_only=args.overture_cache_only,
+            tile_config=args.tile,
+            tile_buffer_m=args.tile_buffer_m,
+            max_cache_mb=args.max_cache_mb,
+            gzip_cache=args.gzip_cache,
+            cli_timeout_s=args.overture_timeout_s,
         )
     except RuntimeError as exc:
         LOGGER.error("Unable to initialise Overture provider: %s", exc)
