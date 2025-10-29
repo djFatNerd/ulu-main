@@ -135,6 +135,12 @@ def run_city(
     if marker.exists() and not force:
         return False
 
+    if sys.platform == "win32":
+        base_cmd = ["bash", str(run_script)]
+    else:
+        base_cmd = [str(run_script)]
+
+    cmd = base_cmd + [
     cmd = [
         str(run_script),
         f"{city.latitude}",
