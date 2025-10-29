@@ -92,6 +92,7 @@ Use `./scripts/run_osm_overture_full_batch.sh` to iterate over a list of target
 cities stored in `docs/cities/cities.jsonl`. On Windows, run the command from a
 shell that provides `bash` (for example Git Bash or WSL) so the underlying
 workflow script can execute. The helper script automatically:
+cities stored in `docs/cities/cities.jsonl`. The helper script automatically:
 
 - Loads each city's latitude/longitude from the JSONL file (one JSON object per
   line).
