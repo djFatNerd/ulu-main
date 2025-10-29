@@ -141,8 +141,6 @@ def run_city(
         base_cmd = [str(run_script)]
 
     cmd = base_cmd + [
-    cmd = [
-        str(run_script),
         f"{city.latitude}",
         f"{city.longitude}",
         f"{radius}",
