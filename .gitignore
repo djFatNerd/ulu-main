@@ -1,33 +1,67 @@
-**__pycache__**
-**build**
-!tools/build_city_docs/
-!tools/build_city_docs/**
-**egg-info**
-**dist**
+# ======================
+# 🔧 Python & Build Artifacts
+# ======================
+__pycache__/
 *.pyc
-venv/
-*.idea/
+*.pyo
+*.pyd
 *.so
-*.sh
-!scripts/*.sh
+*.egg-info/
+*.dist-info/
 *.pth
 *.pkl
 *.zip
 *.bin
-output
-version.py
-*.png
-*/external_libs/*
-keys
-temp_files/*
 *.DS_Store
+
+# ======================
+# 🧱 Build & Distribution
+# ======================
+/build/
+*/build/
+dist/
+version.py
+
+# ======================
+# 🧪 Virtual Environments & IDE
+# ======================
+venv/
+.env/
+.idea/
+.vscode/
 *.editorconfig
-*.vscode
+
+# ======================
+# 🧾 Shell Scripts
+# ======================
+*.sh
+!scripts/*.sh
+
+# ======================
+# 🧰 Project Outputs
+# ======================
+output/
+temp_files/*
+keys/
+
+# ======================
+# 📦 Data (ignore large or generated datasets)
 data/benchmark/*
+data/overture_sample/*.parquet
+data/open/*
+data/cities_only/*
+data/cities_new/*
+data/cities/*
+data/  # ignore all raw data under /data
+
+# ======================
+# 🗂️ Docs (auto-generated content)
 docs/cities
 docs/cities_new
 docs/cities_only
-data/overture_sample/*.parquet
+
+# ======================
+# 🗺️ Semantic Datasets (generated)
 semantic_dataset_overture
 semantic_dataset_osm_overture_google_cost_down
 semantic_dataset_osm_overture_google
@@ -36,3 +70,12 @@ semantic_dataset_osm
 times_square
 times_square_free
 times_square_large
+
+# ======================
+# 🧩 External Libraries
+*/external_libs/*
+
+# ======================
+# 🏗️ Whitelists (force include even if matched above)
+!tools/build_city_docs/
+!tools/build_city_docs/**

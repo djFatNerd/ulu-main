@@ -1,0 +1,21 @@
+{
+  "center": {
+    "lat": 34.0522,
+    "lon": -118.2437
+  },
+  "radius_m": 2000.0,
+  "resolution_m": 1.0,
+  "bbox": {
+    "south": 34.03416952434815,
+    "west": -118.26536185292167,
+    "north": 34.07023047565185,
+    "east": -118.22203814707834
+  },
+  "semantic_map_path": "E:\\research\\research_2025_10\\ulu-main\\data\\Los Angeles, USA\\semantic_map.npy",
+  "buildings_geojson": "E:\\research\\research_2025_10\\ulu-main\\data\\Los Angeles, USA\\buildings_enriched_osm_overture.geojson",
+  "provider": {
+    "overture_enabled": true,
+    "overture_matches": 44,
+    "overture_errors": 0
+  }
+}

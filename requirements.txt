@@ -8,3 +8,4 @@ overturemaps
 duckdb
 pandas
 boto3
+geopandas

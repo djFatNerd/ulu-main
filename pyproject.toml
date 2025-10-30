@@ -1,0 +1,48 @@
+[project]
+name = "ulu"
+version = "0.1.0"
+description = "Urban Layout and City Generation Toolkit (CityCraft / ULU Tools)"
+authors = [
+  { name = "Jie Deng", email = "jie.deng@example.com" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+  "numpy>=1.20",
+  "requests>=2.0",
+  "Pillow>=9.0",
+  "shapely>=2.0",
+  "tqdm>=4.0",
+  "googlemaps>=4.10",
+  "overturemaps",
+  "duckdb",
+  "pandas",
+  "boto3",
+  "geopandas",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest",
+  "black",
+  "flake8",
+  "mypy",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# ---- setuptools config: use automatic package discovery under repo root ----
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tools*"]
+exclude = ["tests*", "docs*"]
+
+# [tool.setuptools.package-data]
+# "tools" = ["**/*.json", "**/*.yml", "**/*.yaml", "**/*.txt"]
+
+[tool.black]
+line-length = 100
+target-version = ["py38", "py39", "py310", "py311"]

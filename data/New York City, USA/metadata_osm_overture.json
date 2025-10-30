@@ -1,0 +1,21 @@
+{
+  "center": {
+    "lat": 40.7128,
+    "lon": -74.006
+  },
+  "radius_m": 2000.0,
+  "resolution_m": 1.0,
+  "bbox": {
+    "south": 40.69478982414574,
+    "west": -74.02966883584723,
+    "north": 40.730810175854266,
+    "east": -73.98233116415277
+  },
+  "semantic_map_path": "E:\\research\\research_2025_10\\ulu-main\\data\\New York City, USA\\semantic_map.npy",
+  "buildings_geojson": "E:\\research\\research_2025_10\\ulu-main\\data\\New York City, USA\\buildings_enriched_osm_overture.geojson",
+  "provider": {
+    "overture_enabled": true,
+    "overture_matches": 51,
+    "overture_errors": 0
+  }
+}
